@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, globalShortcut, session, s
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 
 const GITHUB_REPO = 'AlexWBMaya/tela-compartilhada';
 
@@ -30,7 +30,8 @@ let overlayState = {
 
 let pendingCaptureConfig = {
   sourceId: null,
-  includeSystemAudio: true
+  includeSystemAudio: true,
+  useFallbackSystemLoopback: false
 };
 
 let latestUpdateInfo = null;
@@ -76,7 +77,7 @@ function createMainWindow() {
       }
 
       const response = { video: chosenSource };
-      if (pendingCaptureConfig.includeSystemAudio) {
+      if (pendingCaptureConfig.includeSystemAudio && pendingCaptureConfig.useFallbackSystemLoopback) {
         response.audio = 'loopback';
       }
       callback(response);
@@ -454,6 +455,190 @@ function executeRemoteInputEvent(evt) {
 }
 
 // ============================================================================
+// CAPTURA DE ÁUDIO ISOLADO POR JANELA / JANELA ATIVA (WASAPI PROCESS LOOPBACK)
+// Ignora Discord e o próprio Tela Compartilhada sem precisar de drivers externos
+// ============================================================================
+let audioWorker = null;
+let audioRemainderBuffer = null;
+let audioStderrBuffer = '';
+let compiledAudioWorkerPath = null;
+let currentAudioStatus = {
+  state: 'IDLE',
+  pid: 0,
+  exeName: '',
+  title: ''
+};
+
+function ensureAudioWorkerBinary() {
+  if (process.platform !== 'win32') return null;
+  if (compiledAudioWorkerPath && fs.existsSync(compiledAudioWorkerPath)) {
+    return compiledAudioWorkerPath;
+  }
+
+  const userDataDir = app.getPath('userData');
+  const targetExe = path.join(userDataDir, 'tc-audio-loopback-v2.exe');
+  if (fs.existsSync(targetExe)) {
+    compiledAudioWorkerPath = targetExe;
+    return targetExe;
+  }
+
+  const csSourcePath = path.join(__dirname, 'src', 'audio-loopback-worker.cs');
+  if (!fs.existsSync(csSourcePath)) {
+    return null;
+  }
+
+  const windir = process.env.WINDIR || 'C:\\Windows';
+  const csc64 = path.join(windir, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+  const csc32 = path.join(windir, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe');
+  const cscPath = fs.existsSync(csc64) ? csc64 : fs.existsSync(csc32) ? csc32 : null;
+  if (!cscPath) {
+    return null;
+  }
+
+  const tempCs = path.join(app.getPath('temp'), `tc_audio_worker_${process.pid}_${Date.now()}.cs`);
+  try {
+    const csCode = fs.readFileSync(csSourcePath, 'utf8');
+    fs.writeFileSync(tempCs, csCode, 'utf8');
+    execFileSync(cscPath, ['/nologo', '/optimize+', `/out:${targetExe}`, tempCs], {
+      windowsHide: true,
+      stdio: 'ignore'
+    });
+    if (fs.existsSync(targetExe)) {
+      compiledAudioWorkerPath = targetExe;
+      return targetExe;
+    }
+  } catch (err) {
+    console.warn('Falha ao compilar worker de áudio WASAPI:', err);
+  } finally {
+    try {
+      if (fs.existsSync(tempCs)) fs.unlinkSync(tempCs);
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+function parseAudioWorkerStderrLine(line) {
+  if (!line || !line.startsWith('STATUS|')) return;
+  const parts = line.split('|');
+  currentAudioStatus = {
+    state: parts[1] || 'IDLE',
+    pid: Number(parts[2]) || 0,
+    exeName: parts[3] || '',
+    title: parts[4] || ''
+  };
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('audio-capture:status', currentAudioStatus);
+  }
+}
+
+function startOrUpdateAudioWorker(config = {}) {
+  const mode = config?.mode === 'window' && Number(config?.hwnd) > 0 ? 'window' : 'active';
+  const hwnd = Number(config?.hwnd) || 0;
+
+  if (audioWorker && !audioWorker.killed && audioWorker.stdin && !audioWorker.stdin.destroyed) {
+    try {
+      if (mode === 'window' && hwnd > 0) {
+        audioWorker.stdin.write(`WINDOW ${hwnd}\n`);
+      } else {
+        audioWorker.stdin.write('ACTIVE\n');
+      }
+      return { ok: true, status: currentAudioStatus };
+    } catch (_) {}
+  }
+
+  stopAudioWorker();
+
+  const exePath = ensureAudioWorkerBinary();
+  if (!exePath) {
+    return { ok: false, error: 'Worker WASAPI indisponível neste sistema.' };
+  }
+
+  audioRemainderBuffer = null;
+  audioStderrBuffer = '';
+
+  try {
+    audioWorker = spawn(
+      exePath,
+      ['--self-pid', String(process.pid), '--mode', mode, '--hwnd', String(hwnd)],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+      }
+    );
+  } catch (err) {
+    audioWorker = null;
+    return { ok: false, error: err.message };
+  }
+
+  audioWorker.stdout.on('data', (chunk) => {
+    if (!chunk || chunk.length === 0) return;
+    let combined = chunk;
+    if (audioRemainderBuffer && audioRemainderBuffer.length > 0) {
+      combined = Buffer.concat([audioRemainderBuffer, chunk]);
+      audioRemainderBuffer = null;
+    }
+
+    const alignedLen = combined.length & ~3;
+    if (combined.length > alignedLen) {
+      audioRemainderBuffer = Buffer.from(combined.subarray(alignedLen));
+    }
+
+    if (alignedLen > 0 && mainWindow && !mainWindow.isDestroyed()) {
+      const payload = combined.length === alignedLen ? combined : combined.subarray(0, alignedLen);
+      mainWindow.webContents.send('audio-capture:pcm', payload);
+    }
+  });
+
+  audioWorker.stderr.on('data', (chunk) => {
+    audioStderrBuffer += chunk.toString('utf8');
+    let nlIndex;
+    while ((nlIndex = audioStderrBuffer.indexOf('\n')) !== -1) {
+      const line = audioStderrBuffer.slice(0, nlIndex).trim();
+      audioStderrBuffer = audioStderrBuffer.slice(nlIndex + 1);
+      parseAudioWorkerStderrLine(line);
+    }
+  });
+
+  audioWorker.on('exit', () => {
+    audioWorker = null;
+    audioRemainderBuffer = null;
+  });
+
+  audioWorker.on('error', () => {
+    audioWorker = null;
+    audioRemainderBuffer = null;
+  });
+
+  return { ok: true, status: currentAudioStatus };
+}
+
+function stopAudioWorker() {
+  if (audioWorker) {
+    try {
+      if (audioWorker.stdin && !audioWorker.stdin.destroyed) {
+        audioWorker.stdin.write('STOP\n');
+      }
+    } catch (_) {}
+    try {
+      if (!audioWorker.killed) {
+        audioWorker.kill();
+      }
+    } catch (_) {}
+    audioWorker = null;
+  }
+  audioRemainderBuffer = null;
+  audioStderrBuffer = '';
+  currentAudioStatus = {
+    state: 'IDLE',
+    pid: 0,
+    exeName: '',
+    title: ''
+  };
+  return true;
+}
+
+// ============================================================================
 // ATALHOS GLOBAIS
 // ============================================================================
 function registerGlobalShortcuts() {
@@ -579,9 +764,22 @@ ipcMain.handle('desktop:get-sources', async () => {
 ipcMain.handle('desktop:prepare-capture', (_event, config) => {
   pendingCaptureConfig = {
     sourceId: config?.sourceId || null,
-    includeSystemAudio: Boolean(config?.includeSystemAudio)
+    includeSystemAudio: Boolean(config?.includeSystemAudio),
+    useFallbackSystemLoopback: Boolean(config?.useFallbackSystemLoopback)
   };
   return true;
+});
+
+ipcMain.handle('audio-capture:start', (_event, config) => {
+  return startOrUpdateAudioWorker(config);
+});
+
+ipcMain.handle('audio-capture:update-target', (_event, config) => {
+  return startOrUpdateAudioWorker(config);
+});
+
+ipcMain.handle('audio-capture:stop', () => {
+  return stopAudioWorker();
 });
 
 ipcMain.handle('window:minimize', () => {
@@ -635,6 +833,11 @@ ipcMain.on('remote-input:execute', (_event, evt) => {
 });
 
 app.whenReady().then(() => {
+  setTimeout(() => {
+    try {
+      ensureAudioWorkerBinary();
+    } catch (_) {}
+  }, 100);
   createMainWindow();
   registerGlobalShortcuts();
 
@@ -647,6 +850,7 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  stopAudioWorker();
   if (inputWorker && !inputWorker.killed) {
     try {
       inputWorker.kill();

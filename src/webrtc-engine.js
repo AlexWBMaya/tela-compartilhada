@@ -103,9 +103,18 @@ export class MultiStreamRoomEngine {
     this.qualityConfig = {
       ...QUALITY_PRESETS['balanced-60'],
       includeSystemAudio: true,
+      audioTargetSourceId: 'active',
       sourceId: null,
       sourceName: 'Tela Principal'
     };
+
+    this.audioCtx = null;
+    this.workletLoaded = false;
+    this.audioWorkletNode = null;
+    this.audioDestination = null;
+    this.removeAudioPcmListener = null;
+    this.removeAudioStatusListener = null;
+    this.activeAudioStatus = null;
 
     this.statsInterval = null;
     this.previousStats = new Map();
@@ -604,6 +613,128 @@ export class MultiStreamRoomEngine {
     });
   }
 
+  _extractWindowHwnd(sourceId) {
+    if (!sourceId || typeof sourceId !== 'string') return 0;
+    const match = /^window:(\d+):/i.exec(sourceId.trim());
+    return match ? Number(match[1]) || 0 : 0;
+  }
+
+  _resolveAudioWorkerTarget() {
+    const videoWindowHwnd = this._extractWindowHwnd(this.qualityConfig.sourceId);
+    if (videoWindowHwnd > 0) {
+      return { mode: 'window', hwnd: videoWindowHwnd };
+    }
+
+    const customAudioHwnd = this._extractWindowHwnd(this.qualityConfig.audioTargetSourceId);
+    if (customAudioHwnd > 0) {
+      return { mode: 'window', hwnd: customAudioHwnd };
+    }
+
+    return { mode: 'active', hwnd: 0 };
+  }
+
+  async _setupIsolatedAudioTrack(workerTarget) {
+    if (!window.electronAPI?.startProcessAudio) return null;
+
+    try {
+      const res = await window.electronAPI.startProcessAudio(workerTarget);
+      if (!res?.ok) return null;
+      if (res.status) {
+        this.activeAudioStatus = res.status;
+      }
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!this.audioCtx || this.audioCtx.state === 'closed') {
+        this.audioCtx = new AudioCtx({
+          sampleRate: 48000,
+          latencyHint: 'interactive'
+        });
+        this.workletLoaded = false;
+        this.audioWorkletNode = null;
+      }
+
+      if (this.audioCtx.state === 'suspended') {
+        await this.audioCtx.resume();
+      }
+
+      if (!this.workletLoaded) {
+        await this.audioCtx.audioWorklet.addModule('audio-capture-worklet.js');
+        this.workletLoaded = true;
+      }
+
+      if (!this.audioWorkletNode) {
+        this.audioWorkletNode = new AudioWorkletNode(this.audioCtx, 'process-audio-worklet', {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2]
+        });
+      } else {
+        this.audioWorkletNode.port.postMessage({ type: 'reset' });
+        try {
+          this.audioWorkletNode.disconnect();
+        } catch (_) {}
+      }
+
+      this.audioDestination = this.audioCtx.createMediaStreamDestination();
+      this.audioWorkletNode.connect(this.audioDestination);
+
+      if (!this.removeAudioPcmListener) {
+        this.removeAudioPcmListener = window.electronAPI.onProcessAudioChunk((pcmChunk) => {
+          if (this.audioWorkletNode) {
+            this.audioWorkletNode.port.postMessage(pcmChunk);
+          }
+        });
+      }
+
+      if (!this.removeAudioStatusListener && window.electronAPI.onProcessAudioStatus) {
+        this.removeAudioStatusListener = window.electronAPI.onProcessAudioStatus((status) => {
+          this.activeAudioStatus = status;
+          this.callbacks.onAudioTargetChanged?.(status);
+        });
+      }
+
+      const track = this.audioDestination.stream.getAudioTracks()[0] || null;
+      if (track) {
+        try {
+          track.contentHint = 'music';
+        } catch (_) {}
+      }
+      return track;
+    } catch (err) {
+      console.warn('Falha ao inicializar áudio isolado por processo:', err);
+      return null;
+    }
+  }
+
+  _stopIsolatedAudioCapture() {
+    if (this.removeAudioPcmListener) {
+      try {
+        this.removeAudioPcmListener();
+      } catch (_) {}
+      this.removeAudioPcmListener = null;
+    }
+    if (this.removeAudioStatusListener) {
+      try {
+        this.removeAudioStatusListener();
+      } catch (_) {}
+      this.removeAudioStatusListener = null;
+    }
+    if (this.audioWorkletNode) {
+      try {
+        this.audioWorkletNode.port.postMessage({ type: 'reset' });
+        this.audioWorkletNode.disconnect();
+      } catch (_) {}
+    }
+    if (this.audioDestination) {
+      try {
+        this.audioDestination.stream.getTracks().forEach((t) => t.stop());
+      } catch (_) {}
+      this.audioDestination = null;
+    }
+    this.activeAudioStatus = null;
+    window.electronAPI?.stopProcessAudio?.();
+  }
+
   _buildMyStreamMeta() {
     const videoTrack = this.localStream?.getVideoTracks()?.[0];
     const settings = videoTrack?.getSettings?.() || {};
@@ -616,12 +747,13 @@ export class MultiStreamRoomEngine {
       fps: this.qualityConfig.fps,
       bitrateMbps: this.qualityConfig.bitrateMbps,
       codec: this.qualityConfig.codec,
-      hasAudio
+      hasAudio,
+      audioWindowTitle: this.activeAudioStatus?.title || null
     };
   }
 
   /**
-   * Inicia ou troca a captura de tela/jogo (APENAS vídeo + áudio opcional do sistema/jogo, SEM microfone).
+   * Inicia ou troca a captura de tela/jogo (vídeo de alta performance + áudio isolado apenas da janela selecionada ou janela ativa, sem Discord).
    */
   async startScreenShare(customConfig = {}) {
     this.qualityConfig = {
@@ -631,17 +763,28 @@ export class MultiStreamRoomEngine {
 
     const { sourceId, includeSystemAudio, width, height, fps, contentHint } = this.qualityConfig;
 
-    // Prepara o handler do processo principal do Electron com a janela/tela escolhida e loopback de áudio
+    let isolatedAudioTrack = null;
+    if (includeSystemAudio) {
+      const workerTarget = this._resolveAudioWorkerTarget();
+      isolatedAudioTrack = await this._setupIsolatedAudioTrack(workerTarget);
+    } else {
+      this._stopIsolatedAudioCapture();
+    }
+
+    const useFallbackSystemLoopback = Boolean(includeSystemAudio && !isolatedAudioTrack);
+
+    // Prepara o handler do processo principal do Electron com a janela/tela escolhida
     if (window.electronAPI?.prepareCapture) {
       await window.electronAPI.prepareCapture({
         sourceId,
-        includeSystemAudio
+        includeSystemAudio,
+        useFallbackSystemLoopback
       });
     }
 
     let newStream = null;
 
-    // 1ª tentativa: getDisplayMedia nativo (suporta loopback de áudio limpo do Windows + captura WGC de alto FPS)
+    // 1ª tentativa: getDisplayMedia nativo (captura WGC de alto FPS)
     try {
       newStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -649,7 +792,7 @@ export class MultiStreamRoomEngine {
           height: { ideal: height, max: height },
           frameRate: { ideal: fps, max: fps }
         },
-        audio: Boolean(includeSystemAudio)
+        audio: useFallbackSystemLoopback
       });
     } catch (err) {
       console.warn('getDisplayMedia falhou, usando fallback desktopCapturer getUserMedia:', err);
@@ -668,7 +811,7 @@ export class MultiStreamRoomEngine {
         }
       };
 
-      const audioConstraints = includeSystemAudio
+      const audioConstraints = useFallbackSystemLoopback
         ? {
             mandatory: {
               chromeMediaSource: 'desktop',
@@ -683,7 +826,6 @@ export class MultiStreamRoomEngine {
           audio: audioConstraints
         });
       } catch (audioErr) {
-        // Caso uma janela específica não permita captura direta de áudio no fallback, captura apenas o vídeo
         newStream = await navigator.mediaDevices.getUserMedia({
           video: videoConstraints,
           audio: false
@@ -692,7 +834,23 @@ export class MultiStreamRoomEngine {
     }
 
     if (!newStream) {
+      if (isolatedAudioTrack) {
+        this._stopIsolatedAudioCapture();
+      }
       throw new Error('Não foi possível capturar a tela ou janela selecionada.');
+    }
+
+    // Anexa a track de áudio isolada por janela/processo (sem Discord)
+    if (isolatedAudioTrack) {
+      newStream.getAudioTracks().forEach((t) => {
+        if (t.id !== isolatedAudioTrack.id) {
+          t.stop();
+          newStream.removeTrack(t);
+        }
+      });
+      if (!newStream.getAudioTracks().some((t) => t.id === isolatedAudioTrack.id)) {
+        newStream.addTrack(isolatedAudioTrack);
+      }
     }
 
     // Aplica dica de conteúdo (motion = prioriza fluidez de FPS em jogos; detail = prioriza nitidez de texto)
@@ -713,7 +871,12 @@ export class MultiStreamRoomEngine {
     this.isSharing = true;
 
     if (previousStream) {
-      previousStream.getTracks().forEach((t) => t.stop());
+      const activeIds = new Set(newStream.getTracks().map((t) => t.id));
+      previousStream.getTracks().forEach((t) => {
+        if (!activeIds.has(t.id)) {
+          t.stop();
+        }
+      });
     }
 
     // Conecta ou atualiza todos os peers da sala
@@ -785,6 +948,8 @@ export class MultiStreamRoomEngine {
     if (this.allowedControllerPeerId) {
       this.revokeRemoteControl();
     }
+
+    this._stopIsolatedAudioCapture();
 
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());

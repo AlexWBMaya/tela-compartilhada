@@ -99,6 +99,9 @@ const el = {
   tabSourceWindows: document.getElementById('tab-source-windows'),
 
   shareSystemAudioCheckbox: document.getElementById('share-system-audio-checkbox'),
+  shareAudioModeHint: document.getElementById('share-audio-mode-hint'),
+  audioTargetPickerRow: document.getElementById('audio-target-picker-row'),
+  selectAudioTarget: document.getElementById('select-audio-target'),
   modalEcoPreviewCheckbox: document.getElementById('modal-eco-preview-checkbox'),
   presetsGrid: document.getElementById('presets-grid'),
 
@@ -277,7 +280,16 @@ const engine = new MultiStreamRoomEngine({
           : minimizedViewers > 0
           ? 'Pausado (fecharam sua tela)'
           : 'Ninguém abriu ainda';
-      el.localShareText.textContent = `${meta.height}p ${meta.fps}FPS (${meta.bitrateMbps}Mbps) | ${viewersInfo}`;
+      const audioLabel = meta.hasAudio
+        ? ` | Som: ${meta.audioWindowTitle ? meta.audioWindowTitle.slice(0, 26) : 'Janela ativa'}`
+        : ' | Sem som';
+      el.localShareText.textContent = `${meta.height}p ${meta.fps}FPS (${meta.bitrateMbps}Mbps)${audioLabel} | ${viewersInfo}`;
+    }
+  },
+
+  onAudioTargetChanged: () => {
+    if (engine.isSharing) {
+      updateShareControlButtons();
     }
   },
 
@@ -997,9 +1009,57 @@ function renderSourcesGrid() {
       uiState.selectedSourceId = src.id;
       uiState.selectedSourceName = src.name;
       renderSourcesGrid();
+      syncAudioTargetPickerUI();
     });
     el.sourcesGrid.appendChild(item);
   }
+  syncAudioTargetPickerUI();
+}
+
+function syncAudioTargetPickerUI() {
+  if (!el.audioTargetPickerRow || !el.selectAudioTarget) return;
+
+  const audioEnabled = Boolean(el.shareSystemAudioCheckbox?.checked);
+  const selectedSrc = uiState.availableSources.find((s) => s.id === uiState.selectedSourceId);
+  const isScreenSelected = selectedSrc ? Boolean(selectedSrc.isScreen) : String(uiState.selectedSourceId || '').startsWith('screen:');
+
+  if (el.shareAudioModeHint) {
+    if (!audioEnabled) {
+      el.shareAudioModeHint.textContent = 'Transmissão sem som (apenas imagem).';
+    } else if (!isScreenSelected && selectedSrc) {
+      el.shareAudioModeHint.textContent = `Enviando exclusivamente o som de "${selectedSrc.name}" (Discord ignorado).`;
+    } else {
+      el.shareAudioModeHint.textContent =
+        'Mesmo transmitindo a tela toda, envia só o áudio da janela ativa (ignora Discord).';
+    }
+  }
+
+  el.audioTargetPickerRow.hidden = !(audioEnabled && isScreenSelected);
+
+  const prevValue = el.selectAudioTarget.value || 'active';
+  el.selectAudioTarget.innerHTML = '';
+
+  const autoOpt = document.createElement('option');
+  autoOpt.value = 'active';
+  autoOpt.textContent = 'Automático: Capturar só a janela ativa no momento (ignora Discord)';
+  el.selectAudioTarget.appendChild(autoOpt);
+
+  const windowSources = uiState.availableSources.filter((src) => {
+    if (src.isScreen) return false;
+    const lower = (src.name || '').toLowerCase();
+    if (lower.includes('discord') || lower.includes('tela compartilhada')) return false;
+    return true;
+  });
+
+  for (const win of windowSources) {
+    const opt = document.createElement('option');
+    opt.value = win.id;
+    opt.textContent = `Fixar som apenas em: ${win.name}`;
+    el.selectAudioTarget.appendChild(opt);
+  }
+
+  const stillExists = Array.from(el.selectAudioTarget.options).some((o) => o.value === prevValue);
+  el.selectAudioTarget.value = stillExists ? prevValue : 'active';
 }
 
 async function openShareConfigurationModal() {
@@ -1017,11 +1077,13 @@ function getSelectedQualityConfig() {
   const bitrateMbps = Number(el.bitrateSlider.value) || 10;
   const codec = el.selectCodec.value || 'H264';
   const contentHint = el.selectPriority.value || 'motion';
+  const audioTargetSourceId = el.selectAudioTarget?.value || 'active';
 
   return {
     sourceId: uiState.selectedSourceId,
     sourceName: uiState.selectedSourceName,
     includeSystemAudio: el.shareSystemAudioCheckbox.checked,
+    audioTargetSourceId,
     width,
     height,
     fps,
@@ -1040,7 +1102,10 @@ function updateShareControlButtons() {
   el.localShareDot.classList.toggle('live', sharing);
   if (sharing) {
     const meta = engine._buildMyStreamMeta();
-    el.localShareText.textContent = `Transmitindo: ${meta.height}p ${meta.fps}FPS (${meta.bitrateMbps}Mbps)`;
+    const audioLabel = meta.hasAudio
+      ? ` | Som: ${meta.audioWindowTitle ? meta.audioWindowTitle.slice(0, 26) : 'Janela ativa'}`
+      : ' | Sem som';
+    el.localShareText.textContent = `Transmitindo: ${meta.height}p ${meta.fps}FPS (${meta.bitrateMbps}Mbps)${audioLabel}`;
   } else {
     el.localShareText.textContent = 'Só assistindo (sem transmitir)';
   }
@@ -1167,6 +1232,10 @@ function initEvents() {
   el.tabSourceAll.addEventListener('click', () => setSourceFilter('all'));
   el.tabSourceScreens.addEventListener('click', () => setSourceFilter('screen'));
   el.tabSourceWindows.addEventListener('click', () => setSourceFilter('window'));
+
+  el.shareSystemAudioCheckbox.addEventListener('change', () => {
+    syncAudioTargetPickerUI();
+  });
 
   el.bitrateSlider.addEventListener('input', () => {
     el.bitrateValueLabel.textContent = `${el.bitrateSlider.value} Mbps`;

@@ -3,6 +3,21 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   getDesktopSources: () => ipcRenderer.invoke('desktop:get-sources'),
   prepareCapture: (config) => ipcRenderer.invoke('desktop:prepare-capture', config),
+  startProcessAudio: (config) => ipcRenderer.invoke('audio-capture:start', config),
+  updateProcessAudioTarget: (config) => ipcRenderer.invoke('audio-capture:update-target', config),
+  stopProcessAudio: () => ipcRenderer.invoke('audio-capture:stop'),
+
+  onProcessAudioChunk: (callback) => {
+    const listener = (_event, chunk) => callback(chunk);
+    ipcRenderer.on('audio-capture:pcm', listener);
+    return () => ipcRenderer.removeListener('audio-capture:pcm', listener);
+  },
+
+  onProcessAudioStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('audio-capture:status', listener);
+    return () => ipcRenderer.removeListener('audio-capture:status', listener);
+  },
 
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
