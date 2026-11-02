@@ -104,6 +104,23 @@ function createMainWindow() {
     mainWindow.webContents.send('window:maximized-changed', false);
   });
 
+  let isClosingGracefully = false;
+  mainWindow.on('close', (event) => {
+    if (isClosingGracefully) return;
+    isClosingGracefully = true;
+    event.preventDefault();
+    try {
+      if (!mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('app:prepare-close');
+      }
+    } catch (_) {}
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.destroy();
+      }
+    }, 180);
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

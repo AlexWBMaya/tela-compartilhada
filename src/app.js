@@ -1321,7 +1321,9 @@ function initEvents() {
     try {
       engine.leaveRoom();
     } catch (_) {}
-    window.electronAPI?.closeWindow();
+    setTimeout(() => {
+      window.electronAPI?.closeWindow();
+    }, 100);
   });
 
   window.addEventListener('beforeunload', () => {
@@ -1385,6 +1387,14 @@ function initEvents() {
     if (window.electronAPI.onMaximizedChanged) {
       window.electronAPI.onMaximizedChanged((isMaximized) => {
         updateMaximizeIcon(isMaximized);
+      });
+    }
+
+    if (window.electronAPI.onPrepareClose) {
+      window.electronAPI.onPrepareClose(() => {
+        try {
+          engine.leaveRoom();
+        } catch (_) {}
       });
     }
 

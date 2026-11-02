@@ -61,5 +61,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = () => callback();
     ipcRenderer.on('shortcut:revoke-remote-control', listener);
     return () => ipcRenderer.removeListener('shortcut:revoke-remote-control', listener);
+  },
+
+  onPrepareClose: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('app:prepare-close', listener);
+    return () => ipcRenderer.removeListener('app:prepare-close', listener);
   }
 });
