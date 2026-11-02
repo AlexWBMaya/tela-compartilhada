@@ -53,7 +53,7 @@
         </button>
 
         <button type="button" class="version-check-btn" id="check-update-btn">
-          v1.4.0
+          v1.5.0
         </button>
 
         <button type="button" class="overlay-trigger-btn" id="toggle-overlay-btn">
@@ -62,9 +62,24 @@
         </button>
 
         <div class="window-controls">
-          <button type="button" class="win-btn" id="win-min-btn" aria-label="Minimizar">_</button>
-          <button type="button" class="win-btn" id="win-max-btn" aria-label="Maximizar">[ ]</button>
-          <button type="button" class="win-btn win-close" id="win-close-btn" aria-label="Fechar">X</button>
+          <button type="button" class="win-btn" id="win-min-btn" title="Minimizar" aria-label="Minimizar">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0 5h10v1H0z" fill="currentColor" />
+            </svg>
+          </button>
+          <button type="button" class="win-btn" id="win-max-btn" title="Maximizar" aria-label="Maximizar">
+            <svg class="icon-win-maximize" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0 0v10h10V0H0zm1 1h8v8H1V1z" fill="currentColor" />
+            </svg>
+            <svg class="icon-win-restore" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" hidden>
+              <path d="M2 0v2H0v8h8V8h2V0H2zm1 1h6v6H8V2H3V1zM1 3h6v6H1V3z" fill="currentColor" />
+            </svg>
+          </button>
+          <button type="button" class="win-btn win-close" id="win-close-btn" title="Fechar" aria-label="Fechar">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M0.7 0L5 4.3 9.3 0 10 0.7 5.7 5 10 9.3 9.3 10 5 5.7 0.7 10 0 9.3 4.3 5 0 0.7z" fill="currentColor" />
+            </svg>
+          </button>
         </div>
       </div>
     </header>

@@ -118,6 +118,18 @@ export class MultiStreamRoomEngine {
 
     this.statsInterval = null;
     this.previousStats = new Map();
+
+    let savedClientId = '';
+    try {
+      savedClientId = localStorage.getItem('sspro_client_instance_id') || '';
+      if (!savedClientId) {
+        savedClientId = `cid-${Math.random().toString(36).substring(2, 10)}-${Date.now().toString(36)}`;
+        localStorage.setItem('sspro_client_instance_id', savedClientId);
+      }
+    } catch (_) {
+      savedClientId = `cid-${Math.random().toString(36).substring(2, 10)}`;
+    }
+    this.clientId = savedClientId;
   }
 
   normalizeRoomCode(code) {
@@ -272,42 +284,95 @@ export class MultiStreamRoomEngine {
       reliable: true,
       metadata: {
         nickname: this.myNickname,
-        roomCode: this.roomCode
+        roomCode: this.roomCode,
+        clientId: this.clientId
       }
     });
 
     this._registerDataConnection(conn, isCoordinator);
   }
 
+  _purgeDuplicatePeers(activePeerId, clientId, nickname) {
+    const now = Date.now();
+    for (const [pid, info] of Array.from(this.peers.entries())) {
+      if (pid === activePeerId) continue;
+      const sameClient = clientId && info.clientId && info.clientId === clientId;
+      const sameNickStale =
+        nickname &&
+        info.nickname &&
+        info.nickname.toLowerCase() === nickname.toLowerCase() &&
+        (!info.conn?.open || now - (info.lastSeen || 0) > 2200);
+
+      if (sameClient || sameNickStale) {
+        this._handlePeerDisconnected(pid);
+      }
+    }
+  }
+
+  _attachPeerConnectionWatchers(pc, remotePeerId) {
+    if (!pc || pc._ssproWatched) return;
+    pc._ssproWatched = true;
+    const checkState = () => {
+      const ice = pc.iceConnectionState;
+      const state = pc.connectionState;
+      if (
+        ice === 'failed' ||
+        ice === 'closed' ||
+        ice === 'disconnected' ||
+        state === 'failed' ||
+        state === 'closed' ||
+        state === 'disconnected'
+      ) {
+        this._handlePeerDisconnected(remotePeerId);
+      }
+    };
+    pc.addEventListener('iceconnectionstatechange', checkState);
+    pc.addEventListener('connectionstatechange', checkState);
+  }
+
   _registerDataConnection(conn, isCoordinator = false) {
     const remotePeerId = conn.peer;
     if (!remotePeerId || remotePeerId === this.myPeerId) return;
+
+    const incomingClientId = conn.metadata?.clientId || null;
+    const incomingNick = conn.metadata?.nickname || 'Amigo';
+    this._purgeDuplicatePeers(remotePeerId, incomingClientId, incomingNick);
 
     let peerEntry = this.peers.get(remotePeerId);
     if (!peerEntry) {
       peerEntry = {
         peerId: remotePeerId,
-        nickname: conn.metadata?.nickname || 'Amigo',
+        clientId: incomingClientId,
+        nickname: incomingNick,
         conn,
         sharing: false,
         streamMeta: null,
         remoteStream: null,
         viewerVisibility: true, // Se este amigo está com a minha tela aberta
-        viewerTier: 'high'      // 'high' | 'thumbnail'
+        viewerTier: 'high',     // 'high' | 'thumbnail'
+        lastSeen: Date.now()
       };
       this.peers.set(remotePeerId, peerEntry);
     } else {
       peerEntry.conn = conn;
+      peerEntry.lastSeen = Date.now();
+      if (incomingClientId) peerEntry.clientId = incomingClientId;
       if (conn.metadata?.nickname) {
         peerEntry.nickname = conn.metadata.nickname;
       }
     }
 
     conn.on('open', () => {
+      peerEntry.lastSeen = Date.now();
+      if (conn.peerConnection) {
+        this._attachPeerConnectionWatchers(conn.peerConnection, remotePeerId);
+      }
+
       // Envia apresentação + estado atual da minha transmissão
       this._sendToPeer(remotePeerId, {
         type: 'hello',
         peerId: this.myPeerId,
+        clientId: this.clientId,
         nickname: this.myNickname,
         sharing: this.isSharing,
         streamMeta: this.isSharing ? this._buildMyStreamMeta() : null
@@ -355,16 +420,36 @@ export class MultiStreamRoomEngine {
     if (!msg || typeof msg !== 'object') return;
     const peerEntry = this.peers.get(remotePeerId);
     if (!peerEntry) return;
+    peerEntry.lastSeen = Date.now();
 
     switch (msg.type) {
       case 'hello': {
         peerEntry.nickname = msg.nickname || peerEntry.nickname;
+        if (msg.clientId) peerEntry.clientId = msg.clientId;
         peerEntry.sharing = Boolean(msg.sharing);
         peerEntry.streamMeta = msg.streamMeta || null;
+        this._purgeDuplicatePeers(remotePeerId, peerEntry.clientId, peerEntry.nickname);
         if (this.isSharing && this.localStream && !this.outgoingCalls.has(remotePeerId)) {
           this._callPeerWithScreen(remotePeerId);
         }
         this._notifyPeersUpdated();
+        break;
+      }
+
+      case 'ping': {
+        this._sendToPeer(remotePeerId, {
+          type: 'pong',
+          ts: msg.ts
+        });
+        break;
+      }
+
+      case 'pong': {
+        break;
+      }
+
+      case 'peer-leaving': {
+        this._handlePeerDisconnected(remotePeerId);
         break;
       }
 
@@ -470,23 +555,35 @@ export class MultiStreamRoomEngine {
     // Responde sem enviar mídia de volta (cada transmissão é unidirecional por chamada para máxima performance)
     mediaConn.answer();
 
+    if (mediaConn.peerConnection) {
+      this._attachPeerConnectionWatchers(mediaConn.peerConnection, remotePeerId);
+    }
+
     mediaConn.on('stream', (remoteStream) => {
+      const incClientId = mediaConn.metadata?.clientId || null;
+      const incNick = mediaConn.metadata?.nickname || 'Amigo';
+      this._purgeDuplicatePeers(remotePeerId, incClientId, incNick);
+
       let peerEntry = this.peers.get(remotePeerId);
       if (!peerEntry) {
         peerEntry = {
           peerId: remotePeerId,
-          nickname: mediaConn.metadata?.nickname || 'Amigo',
+          clientId: incClientId,
+          nickname: incNick,
           conn: null,
           sharing: true,
           streamMeta: mediaConn.metadata?.streamMeta || null,
           remoteStream,
           viewerVisibility: true,
-          viewerTier: 'high'
+          viewerTier: 'high',
+          lastSeen: Date.now()
         };
         this.peers.set(remotePeerId, peerEntry);
       } else {
         peerEntry.sharing = true;
         peerEntry.remoteStream = remoteStream;
+        peerEntry.lastSeen = Date.now();
+        if (incClientId) peerEntry.clientId = incClientId;
         if (mediaConn.metadata?.streamMeta) {
           peerEntry.streamMeta = mediaConn.metadata.streamMeta;
         }
@@ -984,6 +1081,7 @@ export class MultiStreamRoomEngine {
     const call = this.peer.call(remotePeerId, this.localStream, {
       metadata: {
         nickname: this.myNickname,
+        clientId: this.clientId,
         streamMeta: this._buildMyStreamMeta()
       }
     });
@@ -1105,6 +1203,30 @@ export class MultiStreamRoomEngine {
     if (this.statsInterval) clearInterval(this.statsInterval);
 
     this.statsInterval = setInterval(async () => {
+      const now = Date.now();
+
+      // Envia heartbeat (ping) e remove imediatamente membros fantasmas que fecharam o app
+      for (const [remotePeerId, peerEntry] of Array.from(this.peers.entries())) {
+        const pc = peerEntry.conn?.peerConnection;
+        const pcDead =
+          pc &&
+          (pc.iceConnectionState === 'failed' ||
+            pc.iceConnectionState === 'closed' ||
+            pc.iceConnectionState === 'disconnected' ||
+            pc.connectionState === 'failed' ||
+            pc.connectionState === 'closed' ||
+            pc.connectionState === 'disconnected');
+
+        if (pcDead || now - (peerEntry.lastSeen || now) > 5000) {
+          this._handlePeerDisconnected(remotePeerId);
+          continue;
+        }
+
+        if (peerEntry.conn?.open) {
+          this._sendToPeer(remotePeerId, { type: 'ping', ts: now });
+        }
+      }
+
       const statsByPeer = {};
 
       // Coleta telemetria das streams recebidas
@@ -1202,6 +1324,16 @@ export class MultiStreamRoomEngine {
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
       this.statsInterval = null;
+    }
+
+    // Avisa todos os peers conectados antes de fechar para remoção instantânea sem membro fantasma
+    if (this.peers.size > 0) {
+      try {
+        this.broadcastData({
+          type: 'peer-leaving',
+          peerId: this.myPeerId
+        });
+      } catch (_) {}
     }
 
     this.stopScreenShare();

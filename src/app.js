@@ -706,6 +706,13 @@ function createStreamCardElement(info) {
     });
   }
 
+  videoEl.addEventListener('click', () => {
+    if (uiState.controllingPeerId === info.id) return;
+    if (uiState.layoutMode === 'spotlight' && uiState.spotlightStreamId !== info.id) {
+      setLayoutMode('spotlight', info.id);
+    }
+  });
+
   videoEl.addEventListener('dblclick', () => {
     if (uiState.controllingPeerId === info.id) return;
     if (uiState.layoutMode === 'spotlight' && uiState.spotlightStreamId === info.id) {
@@ -1127,6 +1134,21 @@ function toggleMuteAllStreams() {
   el.muteAllStreamsBtn.textContent = uiState.allMuted ? 'Som das telas: Mudo' : 'Som das telas: Ligado';
 }
 
+let clickthroughBannerTimer = null;
+
+function updateMaximizeIcon(isMaximized) {
+  const maxIcon = el.winMaxBtn?.querySelector('.icon-win-maximize');
+  const restoreIcon = el.winMaxBtn?.querySelector('.icon-win-restore');
+  if (maxIcon && restoreIcon) {
+    maxIcon.hidden = Boolean(isMaximized);
+    restoreIcon.hidden = !isMaximized;
+  }
+  if (el.winMaxBtn) {
+    el.winMaxBtn.title = isMaximized ? 'Restaurar tamanho' : 'Maximizar';
+    el.winMaxBtn.setAttribute('aria-label', isMaximized ? 'Restaurar tamanho' : 'Maximizar');
+  }
+}
+
 function applyOverlayStateToDOM(state) {
   uiState.overlayActive = Boolean(state.active);
   uiState.overlayClickThrough = Boolean(state.clickThrough);
@@ -1136,7 +1158,20 @@ function applyOverlayStateToDOM(state) {
   document.documentElement.style.setProperty('--overlay-opacity', String(state.opacity ?? 0.92));
 
   el.overlayHudBar.hidden = !uiState.overlayActive;
-  el.clickthroughBanner.hidden = !(uiState.overlayActive && uiState.overlayClickThrough);
+
+  if (clickthroughBannerTimer) {
+    clearTimeout(clickthroughBannerTimer);
+    clickthroughBannerTimer = null;
+  }
+
+  if (uiState.overlayActive && uiState.overlayClickThrough) {
+    el.clickthroughBanner.hidden = false;
+    clickthroughBannerTimer = setTimeout(() => {
+      el.clickthroughBanner.hidden = true;
+    }, 2000);
+  } else {
+    el.clickthroughBanner.hidden = true;
+  }
 }
 
 function initEvents() {
@@ -1276,8 +1311,24 @@ function initEvents() {
   });
 
   el.winMinBtn.addEventListener('click', () => window.electronAPI?.minimizeWindow());
-  el.winMaxBtn.addEventListener('click', () => window.electronAPI?.toggleMaximizeWindow());
-  el.winCloseBtn.addEventListener('click', () => window.electronAPI?.closeWindow());
+  el.winMaxBtn.addEventListener('click', async () => {
+    const isMax = await window.electronAPI?.toggleMaximizeWindow();
+    if (typeof isMax === 'boolean') {
+      updateMaximizeIcon(isMax);
+    }
+  });
+  el.winCloseBtn.addEventListener('click', () => {
+    try {
+      engine.leaveRoom();
+    } catch (_) {}
+    window.electronAPI?.closeWindow();
+  });
+
+  window.addEventListener('beforeunload', () => {
+    try {
+      engine.leaveRoom();
+    } catch (_) {}
+  });
 
   el.toggleOverlayBtn.addEventListener('click', () => {
     window.electronAPI?.toggleOverlay(true);
@@ -1330,6 +1381,12 @@ function initEvents() {
     window.electronAPI.onOverlayStateChanged((state) => {
       applyOverlayStateToDOM(state);
     });
+
+    if (window.electronAPI.onMaximizedChanged) {
+      window.electronAPI.onMaximizedChanged((isMaximized) => {
+        updateMaximizeIcon(isMaximized);
+      });
+    }
 
     window.electronAPI.onToggleMuteAllShortcut(() => {
       toggleMuteAllStreams();

@@ -64,8 +64,16 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 0 0 12px;
-  gap: 12px;
+  gap: 8px;
   -webkit-app-region: drag;
+  overflow: hidden;
+}
+
+.titlebar-drag {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .titlebar button,
@@ -81,23 +89,32 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .brand-dot {
   width: 8px;
   height: 8px;
+  flex-shrink: 0;
   background: var(--accent);
 }
 
 .brand-name {
   font-weight: 600;
-  font-size: 0.88rem;
+  font-size: 0.86rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .titlebar-center {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .room-pill {
@@ -108,6 +125,7 @@ body {
   border: 1px solid var(--border-subtle);
   padding: 3px 8px;
   font-size: 0.78rem;
+  flex-shrink: 0;
 }
 
 .room-pill-label {
@@ -129,11 +147,16 @@ body {
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   padding: 4px 8px;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-dot {
   width: 8px;
   height: 8px;
+  flex-shrink: 0;
   background: var(--text-muted);
 }
 
@@ -145,6 +168,7 @@ body {
   display: flex;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
 }
 
 .layout-btn {
@@ -152,8 +176,8 @@ body {
   color: var(--text-muted);
   border: none;
   border-right: 1px solid var(--border-subtle);
-  padding: 5px 10px;
-  font-size: 0.76rem;
+  padding: 5px 9px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -176,7 +200,9 @@ body {
   display: flex;
   align-items: center;
   height: 100%;
-  gap: 8px;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .update-ready-btn {
@@ -202,10 +228,11 @@ body {
   background: transparent;
   color: var(--text-muted);
   border: 1px solid var(--border-subtle);
-  padding: 4px 8px;
+  padding: 4px 7px;
   font-size: 0.72rem;
   font-family: Consolas, monospace;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .version-check-btn:hover {
@@ -220,10 +247,11 @@ body {
   background: var(--bg-elevated);
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  padding: 4px 10px;
-  font-size: 0.76rem;
+  padding: 4px 9px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .overlay-trigger-btn:hover {
@@ -243,26 +271,70 @@ kbd {
   display: flex;
   align-items: center;
   height: 100%;
+  flex-shrink: 0;
+  margin-left: 2px;
 }
 
 .win-btn {
-  width: 44px;
+  width: 46px;
   height: 100%;
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: #cfcfcf;
   cursor: pointer;
-  font-size: 0.8rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.win-btn svg {
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
 }
 
 .win-btn:hover {
-  background: #2b2b2b;
-  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.win-btn:active {
+  background: rgba(255, 255, 255, 0.16);
 }
 
 .win-btn.win-close:hover {
-  background: var(--danger);
-  color: #fff;
+  background: #e81123;
+  color: #ffffff;
+}
+
+.win-btn.win-close:active {
+  background: #f1707a;
+  color: #ffffff;
+}
+
+@media (max-width: 1120px) {
+  .overlay-trigger-btn kbd,
+  .room-pill-label {
+    display: none;
+  }
+}
+
+@media (max-width: 920px) {
+  .peers-counter {
+    display: none;
+  }
+  .brand-name {
+    max-width: 95px;
+  }
+}
+
+@media (max-width: 720px) {
+  .brand-name,
+  .version-check-btn {
+    display: none;
+  }
 }
 
 /* ============================================================================
@@ -768,6 +840,21 @@ kbd {
 .streams-stage.layout-spotlight .stream-card:not(.is-spotlight) {
   grid-column: 2 / 3;
   max-height: 175px;
+  cursor: pointer;
+}
+
+.streams-stage.layout-spotlight .stream-card:not(.is-spotlight):hover {
+  border-color: var(--accent);
+}
+
+/* Remove todas as informações/botões da frente das telas pequenas no modo 1 Grande + Pequenas */
+.streams-stage.layout-spotlight .stream-card:not(.is-spotlight) .stream-card-topbar,
+.streams-stage.layout-spotlight .stream-card:not(.is-spotlight) .stream-card-controls {
+  display: none !important;
+}
+
+.streams-stage.layout-spotlight .stream-card:not(.is-spotlight) .eco-hidden-placeholder span {
+  display: none;
 }
 
 /* MODO 3: SÓ 1 TELA */
@@ -1295,16 +1382,29 @@ kbd {
 }
 
 /* ============================================================================
-   MODO OVERLAY
+   MODO OVERLAY (APENAS IMAGEM DA TRANSMISSÃO; OPÇÕES SÓ AO PASSAR O MOUSE)
    ============================================================================ */
 .overlay-hud-bar {
-  background: rgba(16, 16, 16, 0.92);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  background: rgba(14, 14, 14, 0.92);
   border-bottom: 1px solid #3a3a3a;
-  padding: 4px 8px;
+  padding: 5px 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease;
+}
+
+html.is-overlay-mode:not(.is-click-through) .app-shell:hover .overlay-hud-bar {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .overlay-drag-handle {
@@ -1356,28 +1456,57 @@ kbd {
 }
 
 .clickthrough-banner {
-  background: rgba(0, 120, 212, 0.85);
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 45;
+  background: rgba(0, 120, 212, 0.9);
   color: #fff;
   text-align: center;
   font-size: 0.68rem;
-  padding: 2px 6px;
+  padding: 3px 10px;
   pointer-events: none;
 }
 
 html.is-overlay-mode .app-shell {
-  background: rgba(14, 14, 14, var(--overlay-opacity, 0.92));
-  border-color: var(--accent);
+  position: relative;
+  background: rgba(0, 0, 0, var(--overlay-opacity, 0.92));
+  border: none;
+}
+
+html.is-overlay-mode:not(.is-click-through) .app-shell:hover {
+  border: 1px solid var(--accent);
 }
 
 html.is-overlay-mode .titlebar,
 html.is-overlay-mode .bottom-control-bar,
 html.is-overlay-mode .minimized-dock,
-html.is-overlay-mode .room-sidebar {
+html.is-overlay-mode .room-sidebar,
+html.is-overlay-mode .stream-card-topbar {
   display: none !important;
 }
 
 html.is-overlay-mode .streams-stage {
-  padding: 4px;
+  padding: 0 !important;
+}
+
+html.is-overlay-mode .streams-container {
+  gap: 0 !important;
+}
+
+html.is-overlay-mode .stream-card {
+  border: none !important;
+}
+
+html.is-overlay-mode .stream-card-controls {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+html.is-overlay-mode:not(.is-click-through) .app-shell:hover .stream-card:hover .stream-card-controls {
+  opacity: 1 !important;
+  pointer-events: auto !important;
 }
 
 html.is-overlay-mode.is-click-through .overlay-hud-bar,
