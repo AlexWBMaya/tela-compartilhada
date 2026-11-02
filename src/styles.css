@@ -588,6 +588,33 @@ kbd {
   text-overflow: ellipsis;
 }
 
+.member-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.member-mute-btn {
+  background: var(--bg-elevated);
+  color: var(--text-main);
+  border: 1px solid #555;
+  padding: 4px 7px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.member-mute-btn:hover {
+  border-color: var(--accent);
+  background: #2f2f2f;
+}
+
+.member-mute-btn.muted {
+  background: #44161a;
+  color: #ff99a0;
+  border-color: var(--danger);
+}
+
 .member-watch-btn {
   background: var(--accent);
   color: #fff;
@@ -902,6 +929,12 @@ kbd {
   background: var(--danger);
   border-color: var(--danger);
   color: #fff;
+}
+
+.card-action-btn.is-muted {
+  background: #44161a;
+  border-color: var(--danger);
+  color: #ff99a0;
 }
 
 .stream-card.is-controlling-remote {

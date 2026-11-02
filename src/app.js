@@ -569,14 +569,11 @@ function createStreamCardElement(info) {
     videoEl.muted = info.muted;
     videoEl.volume = (info.volume ?? 100) / 100;
     volumeSlider.value = String(info.volume ?? 100);
-    muteBtn.textContent = info.muted ? 'Mudo' : 'Som';
+    muteBtn.textContent = info.muted ? 'Ativar som (Mudo)' : 'Mutar som';
+    muteBtn.classList.toggle('is-muted', Boolean(info.muted));
 
     muteBtn.addEventListener('click', () => {
-      const current = uiState.activeStreams.get(info.id);
-      if (!current) return;
-      current.muted = !current.muted;
-      videoEl.muted = current.muted;
-      muteBtn.textContent = current.muted ? 'Mudo' : 'Som';
+      toggleStreamMute(info.id);
     });
 
     volumeSlider.addEventListener('input', () => {
@@ -587,7 +584,8 @@ function createStreamCardElement(info) {
       current.muted = val === 0;
       videoEl.volume = val / 100;
       videoEl.muted = current.muted;
-      muteBtn.textContent = current.muted ? 'Mudo' : 'Som';
+      updateStreamCardElement(card, current);
+      updateRoomStatusUI(uiState.peersList);
     });
 
     remoteCtrlBtn.addEventListener('click', () => {
@@ -732,6 +730,31 @@ function createStreamCardElement(info) {
   return card;
 }
 
+function toggleStreamMute(streamId) {
+  const current = uiState.activeStreams.get(streamId);
+  if (!current || current.isLocal) return;
+  current.muted = !current.muted;
+  if (!current.muted && current.volume === 0) {
+    current.volume = 100;
+  }
+
+  const card = document.getElementById(`stream-card-${streamId}`);
+  if (card) {
+    const videoEl = card.querySelector('.stream-video');
+    const volumeSlider = card.querySelector('.stream-volume-slider');
+    if (videoEl) {
+      videoEl.muted = current.muted;
+      videoEl.volume = (current.volume ?? 100) / 100;
+    }
+    if (volumeSlider) {
+      volumeSlider.value = String(current.volume ?? 100);
+    }
+    updateStreamCardElement(card, current);
+  }
+
+  updateRoomStatusUI(uiState.peersList);
+}
+
 function updateStreamCardElement(card, info) {
   card.classList.toggle('is-spotlight', uiState.spotlightStreamId === info.id);
   const isControlling = uiState.controllingPeerId === info.id;
@@ -750,10 +773,17 @@ function updateStreamCardElement(card, info) {
     }
   }
 
+  const muteBtn = card.querySelector('.btn-mute-toggle');
+  if (muteBtn && !info.isLocal) {
+    muteBtn.textContent = info.muted ? 'Ativar som (Mudo)' : 'Mutar som';
+    muteBtn.classList.toggle('is-muted', Boolean(info.muted));
+  }
+
   const titleLabel = card.querySelector('.stream-title-label');
   const sourceTitle = info.streamMeta?.sourceName ? ` - ${info.streamMeta.sourceName}` : '';
+  const muteTag = !info.isLocal && info.muted ? ' [SEM SOM]' : '';
   const ctrlTag = isControlling ? ' [CONTROLANDO]' : '';
-  titleLabel.textContent = `${info.nickname}${sourceTitle}${ctrlTag}`;
+  titleLabel.textContent = `${info.nickname}${sourceTitle}${muteTag}${ctrlTag}`;
 
   const videoEl = card.querySelector('.stream-video');
   const ecoPlaceholder = card.querySelector('.eco-hidden-placeholder');
@@ -782,7 +812,7 @@ function updateStreamCardElement(card, info) {
 }
 
 // ============================================================================
-// LISTA LATERAL DA SALA (QUEM ESTÁ NA SALA + QUEM ESTÁ TRANSMITINDO + BOTÃO ASSISTIR/FECHAR)
+// LISTA LATERAL DA SALA (QUEM ESTÁ NA SALA + QUEM ESTÁ TRANSMITINDO + BOTÃO ASSISTIR/FECHAR/MUTAR)
 // ============================================================================
 function updateRoomStatusUI(peersList) {
   const totalInRoom = peersList.length + 1;
@@ -832,6 +862,8 @@ function updateRoomStatusUI(peersList) {
     const row = document.createElement('div');
     row.className = `member-item ${peer.sharing ? 'is-streaming' : ''}`;
     const watching = isWatchingStream(peer.peerId);
+    const activeInfo = uiState.activeStreams.get(peer.peerId);
+    const isPeerMuted = Boolean(activeInfo?.muted);
     const streamDesc = peer.sharing
       ? `${peer.streamMeta?.sourceName || 'Tela'} (${peer.streamMeta?.height || 1080}p ${peer.streamMeta?.fps || 60}FPS)`
       : 'Só na sala';
@@ -847,6 +879,23 @@ function updateRoomStatusUI(peersList) {
     `;
 
     if (peer.sharing) {
+      const actionsBox = document.createElement('div');
+      actionsBox.className = 'member-actions';
+
+      if (watching && activeInfo) {
+        const mutePeerBtn = document.createElement('button');
+        mutePeerBtn.type = 'button';
+        mutePeerBtn.className = `member-mute-btn ${isPeerMuted ? 'muted' : ''}`;
+        mutePeerBtn.textContent = isPeerMuted ? 'Mudo' : 'Mutar';
+        mutePeerBtn.title = isPeerMuted
+          ? 'Clique pra voltar a ouvir esta transmissão'
+          : 'Mutar só o som desta transmissão (continua assistindo)';
+        mutePeerBtn.addEventListener('click', () => {
+          toggleStreamMute(peer.peerId);
+        });
+        actionsBox.appendChild(mutePeerBtn);
+      }
+
       const watchBtn = document.createElement('button');
       watchBtn.type = 'button';
       watchBtn.className = `member-watch-btn ${watching ? 'watching' : ''}`;
@@ -858,7 +907,9 @@ function updateRoomStatusUI(peersList) {
           openSpecificStream(peer.peerId, false);
         }
       });
-      row.appendChild(watchBtn);
+      actionsBox.appendChild(watchBtn);
+
+      row.appendChild(actionsBox);
     }
 
     el.sidebarMembersList.appendChild(row);
@@ -1003,11 +1054,11 @@ function toggleMuteAllStreams() {
     const card = document.getElementById(`stream-card-${id}`);
     if (card) {
       const video = card.querySelector('.stream-video');
-      const muteBtn = card.querySelector('.btn-mute-toggle');
       if (video) video.muted = uiState.allMuted;
-      if (muteBtn) muteBtn.textContent = uiState.allMuted ? 'Mudo' : 'Som';
+      updateStreamCardElement(card, info);
     }
   }
+  updateRoomStatusUI(uiState.peersList);
   el.muteAllStreamsBtn.textContent = uiState.allMuted ? 'Som das telas: Mudo' : 'Som das telas: Ligado';
 }
 
