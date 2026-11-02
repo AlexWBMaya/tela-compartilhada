@@ -3,8 +3,9 @@ import { MultiStreamRoomEngine, QUALITY_PRESETS } from './webrtc-engine.js';
 const uiState = {
   layoutMode: 'grid', // 'grid' | 'spotlight' | 'single'
   spotlightStreamId: null,
-  minimizedStreams: new Set(),
+  minimizedStreams: new Set(), // Streams que o usuário escolheu fechar/ocultar na tela dele
   activeStreams: new Map(),
+  peersList: [],
   hideSelfPreview: false,
   allMuted: false,
   sourceFilter: 'all',
@@ -48,12 +49,21 @@ const el = {
   joinRoomSubmitBtn: document.getElementById('join-room-submit-btn'),
 
   roomSection: document.getElementById('room-section'),
+  roomSidebar: document.getElementById('room-sidebar'),
+  sidebarTitle: document.getElementById('sidebar-title'),
+  sidebarMembersList: document.getElementById('sidebar-members-list'),
+  watchAllStreamsBtn: document.getElementById('watch-all-streams-btn'),
+  closeAllStreamsBtn: document.getElementById('close-all-streams-btn'),
+  toggleSidebarBtn: document.getElementById('toggle-sidebar-btn'),
+
   minimizedDock: document.getElementById('minimized-dock'),
   minimizedPillsList: document.getElementById('minimized-pills-list'),
   restoreAllStreamsBtn: document.getElementById('restore-all-streams-btn'),
 
   streamsStage: document.getElementById('streams-stage'),
   emptyStageCard: document.getElementById('empty-stage-card'),
+  emptyStageTitle: document.getElementById('empty-stage-title'),
+  emptyStageDesc: document.getElementById('empty-stage-desc'),
   emptyStartShareBtn: document.getElementById('empty-start-share-btn'),
   connectedFriendsList: document.getElementById('connected-friends-list'),
   streamsContainer: document.getElementById('streams-container'),
@@ -95,12 +105,15 @@ const engine = new MultiStreamRoomEngine({
     el.roomSection.hidden = false;
     el.roomToolbar.hidden = false;
     el.activeRoomCode.textContent = roomCode;
+    uiState.peersList = [];
     updateRoomStatusUI([]);
+    syncStreamsStage();
   },
 
   onRoomLeft: () => {
     uiState.activeStreams.clear();
     uiState.minimizedStreams.clear();
+    uiState.peersList = [];
     uiState.spotlightStreamId = null;
     el.streamsContainer.innerHTML = '';
     el.roomSection.hidden = true;
@@ -110,7 +123,9 @@ const engine = new MultiStreamRoomEngine({
   },
 
   onPeersUpdated: (peersList) => {
+    uiState.peersList = peersList;
     updateRoomStatusUI(peersList);
+    syncStreamsStage();
   },
 
   onLocalStreamUpdated: (stream, streamMeta) => {
@@ -127,6 +142,7 @@ const engine = new MultiStreamRoomEngine({
       uiState.spotlightStreamId = 'local';
     }
     updateShareControlButtons();
+    updateRoomStatusUI(uiState.peersList);
     syncStreamsStage();
   },
 
@@ -137,6 +153,7 @@ const engine = new MultiStreamRoomEngine({
       uiState.spotlightStreamId = getFirstAvailableStreamId();
     }
     updateShareControlButtons();
+    updateRoomStatusUI(uiState.peersList);
     syncStreamsStage();
   },
 
@@ -158,6 +175,7 @@ const engine = new MultiStreamRoomEngine({
       uiState.spotlightStreamId = peerId;
     }
 
+    updateRoomStatusUI(uiState.peersList);
     syncStreamsStage();
   },
 
@@ -170,6 +188,7 @@ const engine = new MultiStreamRoomEngine({
     if (uiState.spotlightStreamId === peerId) {
       uiState.spotlightStreamId = getFirstAvailableStreamId();
     }
+    updateRoomStatusUI(uiState.peersList);
     syncStreamsStage();
   },
 
@@ -189,10 +208,10 @@ const engine = new MultiStreamRoomEngine({
       const meta = engine._buildMyStreamMeta();
       const viewersInfo =
         activeViewers > 0
-          ? `${activeViewers} vendo`
+          ? `${activeViewers} assistindo`
           : minimizedViewers > 0
-          ? 'Pausado (minimizaram)'
-          : 'Ninguém vendo ainda';
+          ? 'Pausado (fecharam sua tela)'
+          : 'Ninguém abriu ainda';
       el.localShareText.textContent = `${meta.height}p ${meta.fps}FPS (${meta.bitrateMbps}Mbps) | ${viewersInfo}`;
     }
   },
@@ -210,15 +229,74 @@ function getFirstAvailableStreamId() {
   return first.done ? null : first.value;
 }
 
-function setLayoutMode(mode, targetFocusId = null) {
-  uiState.layoutMode = mode;
+// ============================================================================
+// ABRIR / FECHAR TRANSMISSÕES ESPECÍFICAS (EX: VER SÓ JOÃO E ALEX)
+// ============================================================================
+function isWatchingStream(streamId) {
+  return uiState.activeStreams.has(streamId) && !uiState.minimizedStreams.has(streamId);
+}
 
+function openSpecificStream(streamId, exclusiveSingle = false) {
+  uiState.minimizedStreams.delete(streamId);
+
+  if (exclusiveSingle) {
+    uiState.layoutMode = 'single';
+    uiState.spotlightStreamId = streamId;
+    for (const id of uiState.activeStreams.keys()) {
+      if (id !== streamId) {
+        uiState.minimizedStreams.add(id);
+      }
+    }
+  } else {
+    // Se estava no modo "Só 1 Tela" e o usuário clicou em "Assistir" em uma segunda pessoa na lista lateral,
+    // muda automaticamente para Grade para deixar as duas (ou mais) escolhidas abertas!
+    const currentlyOpenCount = Array.from(uiState.activeStreams.keys()).filter(
+      (id) => !uiState.minimizedStreams.has(id)
+    ).length;
+
+    if (uiState.layoutMode === 'single' && currentlyOpenCount > 1) {
+      uiState.layoutMode = 'grid';
+    }
+    if (!uiState.spotlightStreamId) {
+      uiState.spotlightStreamId = streamId;
+    }
+  }
+
+  // Caso seja uma transmissão remota, avisa o peer imediatamente para enviar o vídeo
+  if (streamId !== 'local') {
+    engine.setRemoteStreamVisibility(streamId, true, 'high');
+  }
+
+  updateLayoutButtonsUI();
+  updateRoomStatusUI(uiState.peersList);
+  syncStreamsStage();
+}
+
+function closeSpecificStream(streamId) {
+  uiState.minimizedStreams.add(streamId);
+  if (uiState.spotlightStreamId === streamId) {
+    uiState.spotlightStreamId = getFirstAvailableStreamId();
+  }
+  if (streamId !== 'local') {
+    engine.setRemoteStreamVisibility(streamId, false, 'high');
+  }
+  updateRoomStatusUI(uiState.peersList);
+  syncStreamsStage();
+}
+
+function updateLayoutButtonsUI() {
+  const mode = uiState.layoutMode;
   el.layoutGridBtn.classList.toggle('active', mode === 'grid');
   el.layoutSpotlightBtn.classList.toggle('active', mode === 'spotlight');
   el.layoutSingleBtn.classList.toggle('active', mode === 'single');
 
   el.streamsStage.classList.remove('layout-grid', 'layout-spotlight', 'layout-single');
   el.streamsStage.classList.add(`layout-${mode}`);
+}
+
+function setLayoutMode(mode, targetFocusId = null) {
+  uiState.layoutMode = mode;
+  updateLayoutButtonsUI();
 
   if (targetFocusId && uiState.activeStreams.has(targetFocusId)) {
     uiState.spotlightStreamId = targetFocusId;
@@ -234,40 +312,13 @@ function setLayoutMode(mode, targetFocusId = null) {
         uiState.minimizedStreams.delete(id);
       }
     }
-  } else if (mode === 'grid') {
-    if (uiState.minimizedStreams.size > 0 && uiState.activeStreams.size > 1) {
-      uiState.minimizedStreams.clear();
-    }
   }
 
-  syncStreamsStage();
-}
-
-function minimizeStream(streamId) {
-  uiState.minimizedStreams.add(streamId);
-  if (uiState.spotlightStreamId === streamId) {
-    uiState.spotlightStreamId = getFirstAvailableStreamId();
-  }
-  syncStreamsStage();
-}
-
-function restoreStream(streamId, makeFocus = false) {
-  uiState.minimizedStreams.delete(streamId);
-  if (uiState.layoutMode === 'single' || makeFocus) {
-    uiState.spotlightStreamId = streamId;
-    if (uiState.layoutMode === 'single') {
-      for (const id of uiState.activeStreams.keys()) {
-        if (id !== streamId) uiState.minimizedStreams.add(id);
-      }
-    }
-  }
+  updateRoomStatusUI(uiState.peersList);
   syncStreamsStage();
 }
 
 function syncStreamsStage() {
-  const totalStreams = uiState.activeStreams.size;
-  el.emptyStageCard.hidden = totalStreams > 0;
-
   const visibleStreams = [];
   const minimizedList = [];
 
@@ -276,6 +327,20 @@ function syncStreamsStage() {
       minimizedList.push(info);
     } else {
       visibleStreams.push(info);
+    }
+  }
+
+  // Se não houver nenhuma transmissão aberta no momento, mostra o card central explicativo
+  el.emptyStageCard.hidden = visibleStreams.length > 0;
+  if (visibleStreams.length === 0) {
+    if (minimizedList.length > 0) {
+      el.emptyStageTitle.textContent = `${minimizedList.length} transmissão(ões) rolando na sala`;
+      el.emptyStageDesc.textContent =
+        'Escolha na lista lateral quais transmissões você quer abrir na tela.';
+    } else {
+      el.emptyStageTitle.textContent = 'Ninguém está transmitindo ainda';
+      el.emptyStageDesc.textContent =
+        'Você já está conectado na sala. Quando alguém transmitir, vai aparecer na lista ao lado pra você assistir.';
     }
   }
 
@@ -294,17 +359,19 @@ function syncStreamsStage() {
   else if (count >= 10) cols = 4;
   el.streamsStage.style.setProperty('--grid-cols', String(cols));
 
+  // Atualiza barra superior de transmissões fechadas/pausadas
   el.minimizedDock.hidden = minimizedList.length === 0;
   el.minimizedPillsList.innerHTML = '';
   for (const item of minimizedList) {
     const pill = document.createElement('button');
     pill.type = 'button';
     pill.className = 'minimized-pill';
-    pill.textContent = `${item.nickname} (Abrir)`;
-    pill.addEventListener('click', () => restoreStream(item.id, true));
+    pill.textContent = `${item.nickname} (Assistir)`;
+    pill.addEventListener('click', () => openSpecificStream(item.id, false));
     el.minimizedPillsList.appendChild(pill);
   }
 
+  // Remove cards que foram fechados
   for (const child of Array.from(el.streamsContainer.children)) {
     const sid = child.dataset.streamId;
     if (!uiState.activeStreams.has(sid) || uiState.minimizedStreams.has(sid)) {
@@ -312,6 +379,7 @@ function syncStreamsStage() {
     }
   }
 
+  // Cria ou atualiza os cards abertos
   for (const info of visibleStreams) {
     let card = document.getElementById(`stream-card-${info.id}`);
     if (!card) {
@@ -321,6 +389,7 @@ function syncStreamsStage() {
     updateStreamCardElement(card, info);
   }
 
+  // Atualiza visibilidade de rede para cada peer
   for (const [id, info] of uiState.activeStreams.entries()) {
     if (info.isLocal) continue;
     const isVisible = !uiState.minimizedStreams.has(id);
@@ -375,7 +444,7 @@ function createStreamCardElement(info) {
           Ver só esta
         </button>
         <button type="button" class="card-action-btn btn-minimize-stream">
-          Minimizar
+          Fechar tela
         </button>
         <button type="button" class="card-action-btn btn-fullscreen-stream">
           Tela cheia
@@ -434,11 +503,11 @@ function createStreamCardElement(info) {
   });
 
   singleBtn.addEventListener('click', () => {
-    setLayoutMode('single', info.id);
+    openSpecificStream(info.id, true);
   });
 
   minBtn.addEventListener('click', () => {
-    minimizeStream(info.id);
+    closeSpecificStream(info.id);
   });
 
   fsBtn.addEventListener('click', () => {
@@ -481,6 +550,103 @@ function updateStreamCardElement(card, info) {
     const telemetryBadge = document.getElementById(`telemetry-${info.id}`);
     if (telemetryBadge && info.streamMeta) {
       telemetryBadge.textContent = `${info.streamMeta.height || 1080}p | ${info.streamMeta.fps || 60} FPS | ${info.streamMeta.bitrateMbps} Mbps | ${info.streamMeta.codec}`;
+    }
+  }
+}
+
+// ============================================================================
+// LISTA LATERAL DA SALA (QUEM ESTÁ NA SALA + QUEM ESTÁ TRANSMITINDO + BOTÃO ASSISTIR/FECHAR)
+// ============================================================================
+function updateRoomStatusUI(peersList) {
+  const totalInRoom = peersList.length + 1;
+  const sharingCount = peersList.filter((p) => p.sharing).length + (engine.isSharing ? 1 : 0);
+  el.peersCountText.textContent = `${totalInRoom} na sala | ${sharingCount} transmitindo`;
+  el.sidebarTitle.textContent = `Na sala (${totalInRoom})`;
+
+  // Renderiza lista lateral estilo Discord
+  el.sidebarMembersList.innerHTML = '';
+
+  // 1. Item do próprio usuário
+  const myItem = document.createElement('div');
+  myItem.className = `member-item ${engine.isSharing ? 'is-streaming' : ''}`;
+  const myMeta = engine.isSharing ? engine._buildMyStreamMeta() : null;
+  const myWatching = isWatchingStream('local');
+
+  myItem.innerHTML = `
+    <div class="member-info">
+      <div class="member-name-row">
+        <span class="member-name">${engine.myNickname} (Você)</span>
+        ${engine.isSharing ? '<span class="member-stream-tag">AO VIVO</span>' : ''}
+      </div>
+      <span class="member-sub">
+        ${engine.isSharing ? `${myMeta?.sourceName || 'Sua tela'} (${myMeta?.height || 1080}p)` : 'Só assistindo'}
+      </span>
+    </div>
+  `;
+
+  if (engine.isSharing) {
+    const toggleSelfBtn = document.createElement('button');
+    toggleSelfBtn.type = 'button';
+    toggleSelfBtn.className = `member-watch-btn ${myWatching ? 'watching' : ''}`;
+    toggleSelfBtn.textContent = myWatching ? 'Fechar' : 'Assistir';
+    toggleSelfBtn.addEventListener('click', () => {
+      if (isWatchingStream('local')) {
+        closeSpecificStream('local');
+      } else {
+        openSpecificStream('local', false);
+      }
+    });
+    myItem.appendChild(toggleSelfBtn);
+  }
+  el.sidebarMembersList.appendChild(myItem);
+
+  // 2. Itens de todos os amigos na sala
+  for (const peer of peersList) {
+    const row = document.createElement('div');
+    row.className = `member-item ${peer.sharing ? 'is-streaming' : ''}`;
+    const watching = isWatchingStream(peer.peerId);
+    const streamDesc = peer.sharing
+      ? `${peer.streamMeta?.sourceName || 'Tela'} (${peer.streamMeta?.height || 1080}p ${peer.streamMeta?.fps || 60}FPS)`
+      : 'Só na sala';
+
+    row.innerHTML = `
+      <div class="member-info">
+        <div class="member-name-row">
+          <span class="member-name">${peer.nickname}</span>
+          ${peer.sharing ? '<span class="member-stream-tag">AO VIVO</span>' : ''}
+        </div>
+        <span class="member-sub">${streamDesc}</span>
+      </div>
+    `;
+
+    if (peer.sharing) {
+      const watchBtn = document.createElement('button');
+      watchBtn.type = 'button';
+      watchBtn.className = `member-watch-btn ${watching ? 'watching' : ''}`;
+      watchBtn.textContent = watching ? 'Fechar' : 'Assistir';
+      watchBtn.addEventListener('click', () => {
+        if (isWatchingStream(peer.peerId)) {
+          closeSpecificStream(peer.peerId);
+        } else {
+          openSpecificStream(peer.peerId, false);
+        }
+      });
+      row.appendChild(watchBtn);
+    }
+
+    el.sidebarMembersList.appendChild(row);
+  }
+
+  // Atualiza também os chips rápidos no card central quando nenhuma tela está aberta
+  el.connectedFriendsList.innerHTML = '';
+  for (const peer of peersList) {
+    if (peer.sharing && !isWatchingStream(peer.peerId)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-primary btn-sm';
+      btn.textContent = `Assistir ${peer.nickname}`;
+      btn.addEventListener('click', () => openSpecificStream(peer.peerId, false));
+      el.connectedFriendsList.appendChild(btn);
     }
   }
 }
@@ -588,25 +754,6 @@ function getSelectedQualityConfig() {
   };
 }
 
-function updateRoomStatusUI(peersList) {
-  const totalInRoom = peersList.length + 1;
-  const sharingCount = peersList.filter((p) => p.sharing).length + (engine.isSharing ? 1 : 0);
-  el.peersCountText.textContent = `${totalInRoom} na sala | ${sharingCount} transmitindo`;
-
-  el.connectedFriendsList.innerHTML = '';
-  const meChip = document.createElement('span');
-  meChip.className = 'friend-chip';
-  meChip.textContent = `${engine.myNickname} (Você)`;
-  el.connectedFriendsList.appendChild(meChip);
-
-  for (const peer of peersList) {
-    const chip = document.createElement('span');
-    chip.className = 'friend-chip';
-    chip.textContent = `${peer.nickname}${peer.sharing ? ' (Transmitindo)' : ''}`;
-    el.connectedFriendsList.appendChild(chip);
-  }
-}
-
 function updateShareControlButtons() {
   const sharing = engine.isSharing;
   el.openShareModalBtn.hidden = sharing;
@@ -617,7 +764,7 @@ function updateShareControlButtons() {
     const meta = engine._buildMyStreamMeta();
     el.localShareText.textContent = `Transmitindo: ${meta.height}p ${meta.fps}FPS (${meta.bitrateMbps}Mbps)`;
   } else {
-    el.localShareText.textContent = 'Parado';
+    el.localShareText.textContent = 'Só assistindo (sem transmitir)';
   }
 }
 
@@ -698,13 +845,30 @@ function initEvents() {
   el.layoutSpotlightBtn.addEventListener('click', () => setLayoutMode('spotlight'));
   el.layoutSingleBtn.addEventListener('click', () => setLayoutMode('single'));
 
-  el.restoreAllStreamsBtn.addEventListener('click', () => {
+  const openAllStreams = () => {
     uiState.minimizedStreams.clear();
-    if (uiState.layoutMode === 'single') {
-      setLayoutMode('grid');
-    } else {
-      syncStreamsStage();
+    if (uiState.layoutMode === 'single' && uiState.activeStreams.size > 1) {
+      uiState.layoutMode = 'grid';
+      updateLayoutButtonsUI();
     }
+    updateRoomStatusUI(uiState.peersList);
+    syncStreamsStage();
+  };
+
+  const closeAllStreams = () => {
+    for (const id of uiState.activeStreams.keys()) {
+      uiState.minimizedStreams.add(id);
+    }
+    updateRoomStatusUI(uiState.peersList);
+    syncStreamsStage();
+  };
+
+  el.restoreAllStreamsBtn.addEventListener('click', openAllStreams);
+  el.watchAllStreamsBtn.addEventListener('click', openAllStreams);
+  el.closeAllStreamsBtn.addEventListener('click', closeAllStreams);
+
+  el.toggleSidebarBtn.addEventListener('click', () => {
+    el.roomSidebar.hidden = !el.roomSidebar.hidden;
   });
 
   el.openShareModalBtn.addEventListener('click', openShareConfigurationModal);
@@ -790,7 +954,7 @@ function initEvents() {
     if (ids.length === 0) return;
     const currentIdx = ids.indexOf(uiState.spotlightStreamId);
     const nextId = ids[(currentIdx + 1) % ids.length];
-    setLayoutMode('single', nextId);
+    openSpecificStream(nextId, true);
   });
 
   if (window.electronAPI) {
@@ -855,7 +1019,6 @@ function initEvents() {
       }
     });
 
-    // Verifica atualizações ao abrir o app e a cada 10 minutos
     runUpdateCheck(false);
     setInterval(() => runUpdateCheck(false), 10 * 60 * 1000);
   }

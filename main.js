@@ -226,7 +226,8 @@ function downloadFileWithProgress(url, destPath, onProgress) {
 }
 
 async function checkForGitHubUpdates() {
-  const currentVersion = app.getVersion();
+  const pkg = require(path.join(__dirname, 'package.json'));
+  const currentVersion = pkg.version || '1.0.0';
   try {
     const release = await fetchJson(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
     const latestTag = release.tag_name || release.name || '';

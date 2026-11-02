@@ -53,7 +53,7 @@
         </button>
 
         <button type="button" class="version-check-btn" id="check-update-btn">
-          v1.0.0
+          v1.1.0
         </button>
 
         <button type="button" class="overlay-trigger-btn" id="toggle-overlay-btn">
@@ -163,36 +163,68 @@
 
       <!-- SALA ATIVA -->
       <section class="room-section" id="room-section" hidden>
-        <!-- BARRA DE TELAS MINIMIZADAS -->
-        <div class="minimized-dock" id="minimized-dock" hidden>
-          <span class="minimized-dock-label">Minimizadas (pausadas):</span>
-          <div class="minimized-pills-list" id="minimized-pills-list"></div>
-          <button type="button" class="btn-ghost-xs" id="restore-all-streams-btn">
-            Abrir todas
-          </button>
-        </div>
+        <div class="room-body">
+          <!-- LISTA LATERAL DA SALA (ESTILO DISCORD) -->
+          <aside class="room-sidebar" id="room-sidebar">
+            <div class="sidebar-header">
+              <strong id="sidebar-title">Na sala (1)</strong>
+              <div class="sidebar-bulk-actions">
+                <button type="button" class="btn-ghost-xs" id="watch-all-streams-btn">
+                  Abrir todas
+                </button>
+                <button type="button" class="btn-ghost-xs" id="close-all-streams-btn">
+                  Fechar todas
+                </button>
+              </div>
+            </div>
 
-        <!-- PALCO DE VÍDEOS -->
-        <div class="streams-stage layout-grid" id="streams-stage">
-          <div class="empty-stage-card" id="empty-stage-card">
-            <h2>Ninguém está transmitindo ainda</h2>
-            <p>
-              Clique no botão abaixo pra escolher um monitor ou janela de jogo.
-            </p>
-            <div class="empty-stage-actions">
-              <button type="button" class="btn-primary btn-lg" id="empty-start-share-btn">
-                Transmitir tela
+            <div class="sidebar-hint">
+              Escolha abaixo quais transmissões você quer deixar abertas na sua tela:
+            </div>
+
+            <div class="sidebar-members-list" id="sidebar-members-list">
+              <!-- Preenchido via JS com quem está na sala e quem está transmitindo -->
+            </div>
+          </aside>
+
+          <!-- COLUNA PRINCIPAL DE VÍDEO -->
+          <div class="room-stage-column">
+            <!-- BARRA DE TELAS FECHADAS / MINIMIZADAS -->
+            <div class="minimized-dock" id="minimized-dock" hidden>
+              <span class="minimized-dock-label">Transmissões fechadas pra você (pausadas):</span>
+              <div class="minimized-pills-list" id="minimized-pills-list"></div>
+              <button type="button" class="btn-ghost-xs" id="restore-all-streams-btn">
+                Abrir todas
               </button>
             </div>
-            <div class="connected-friends-preview" id="connected-friends-list"></div>
-          </div>
 
-          <div class="streams-container" id="streams-container"></div>
+            <!-- PALCO DE VÍDEOS -->
+            <div class="streams-stage layout-grid" id="streams-stage">
+              <div class="empty-stage-card" id="empty-stage-card">
+                <h2 id="empty-stage-title">Nenhuma transmissão aberta</h2>
+                <p id="empty-stage-desc">
+                  Você já está na sala. Se alguém estiver transmitindo, clique em Assistir na lista ao lado, ou transmita sua tela abaixo se quiser.
+                </p>
+                <div class="empty-stage-actions">
+                  <button type="button" class="btn-secondary btn-lg" id="empty-start-share-btn">
+                    Transmitir minha tela (opcional)
+                  </button>
+                </div>
+                <div class="connected-friends-preview" id="connected-friends-list"></div>
+              </div>
+
+              <div class="streams-container" id="streams-container"></div>
+            </div>
+          </div>
         </div>
 
         <!-- BARRA INFERIOR -->
         <footer class="bottom-control-bar" id="bottom-control-bar">
           <div class="control-bar-left">
+            <button type="button" class="btn-secondary" id="toggle-sidebar-btn">
+              Lista da sala
+            </button>
+
             <button type="button" class="btn-primary" id="open-share-modal-btn">
               Transmitir tela
             </button>
@@ -209,7 +241,7 @@
           <div class="control-bar-center">
             <div class="perf-indicator" id="local-share-status">
               <span class="perf-dot" id="local-share-dot"></span>
-              <span id="local-share-text">Parado</span>
+              <span id="local-share-text">Só assistindo (sem transmitir)</span>
             </div>
 
             <label class="eco-toggle-pill" for="hide-self-preview-toggle">

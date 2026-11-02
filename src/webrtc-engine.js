@@ -351,6 +351,9 @@ export class MultiStreamRoomEngine {
         peerEntry.nickname = msg.nickname || peerEntry.nickname;
         peerEntry.sharing = Boolean(msg.sharing);
         peerEntry.streamMeta = msg.streamMeta || null;
+        if (this.isSharing && this.localStream && !this.outgoingCalls.has(remotePeerId)) {
+          this._callPeerWithScreen(remotePeerId);
+        }
         this._notifyPeersUpdated();
         break;
       }
@@ -383,10 +386,13 @@ export class MultiStreamRoomEngine {
       }
 
       case 'viewer-visibility': {
-        // O amigo informou se minimizou ou restaurou minha tela, ou se está em miniatura/destaque!
         peerEntry.viewerVisibility = Boolean(msg.visible);
         peerEntry.viewerTier = msg.tier || 'high';
-        this._applyEncodingForPeer(remotePeerId);
+        if (peerEntry.viewerVisibility && this.isSharing && this.localStream && !this.outgoingCalls.has(remotePeerId)) {
+          this._callPeerWithScreen(remotePeerId);
+        } else {
+          this._applyEncodingForPeer(remotePeerId);
+        }
         this._notifyPeersUpdated();
         break;
       }
