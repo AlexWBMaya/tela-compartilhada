@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://*.peerjs.com wss://*.peerjs.com; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>Tela Compartilhada</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app-root" class="app-shell">
+    <!-- BARRA DE TÍTULO -->
+    <header class="titlebar" id="titlebar">
+      <div class="titlebar-drag">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span class="brand-name">Tela Compartilhada</span>
+        </div>
+      </div>
+
+      <!-- STATUS DA SALA E MODOS DE LAYOUT -->
+      <div class="titlebar-center" id="room-toolbar" hidden>
+        <div class="room-pill" id="room-code-pill">
+          <span class="room-pill-label">Sala:</span>
+          <strong class="room-pill-code" id="active-room-code">---</strong>
+          <button type="button" class="icon-btn-sm" id="copy-room-btn">
+            Copiar
+          </button>
+        </div>
+
+        <div class="peers-counter" id="peers-counter-badge">
+          <span class="status-dot online"></span>
+          <span id="peers-count-text">1 na sala</span>
+        </div>
+
+        <div class="layout-switcher" role="group" aria-label="Visualização">
+          <button type="button" class="layout-btn active" data-layout="grid" id="layout-grid-btn">
+            Grade
+          </button>
+          <button type="button" class="layout-btn" data-layout="spotlight" id="layout-spotlight-btn">
+            1 Grande + Pequenas
+          </button>
+          <button type="button" class="layout-btn" data-layout="single" id="layout-single-btn">
+            Só 1 Tela
+          </button>
+        </div>
+      </div>
+
+      <!-- AÇÕES RÁPIDAS E JANELA -->
+      <div class="titlebar-actions">
+        <button type="button" class="update-ready-btn" id="update-app-btn" hidden>
+          Atualização disponível - Clique para atualizar
+        </button>
+
+        <button type="button" class="version-check-btn" id="check-update-btn">
+          v1.0.0
+        </button>
+
+        <button type="button" class="overlay-trigger-btn" id="toggle-overlay-btn">
+          <span>Overlay</span>
+          <kbd>Alt+Shift+O</kbd>
+        </button>
+
+        <div class="window-controls">
+          <button type="button" class="win-btn" id="win-min-btn" aria-label="Minimizar">_</button>
+          <button type="button" class="win-btn" id="win-max-btn" aria-label="Maximizar">[ ]</button>
+          <button type="button" class="win-btn win-close" id="win-close-btn" aria-label="Fechar">X</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- BARRA DO MODO OVERLAY -->
+    <div class="overlay-hud-bar" id="overlay-hud-bar" hidden>
+      <div class="overlay-drag-handle">OVERLAY (Arraste aqui)</div>
+
+      <div class="overlay-controls-group">
+        <label class="overlay-opacity-control" for="overlay-opacity-slider">
+          <span>Opacidade</span>
+          <input type="range" id="overlay-opacity-slider" min="25" max="100" value="92" />
+        </label>
+
+        <button type="button" class="overlay-chip-btn" id="overlay-cycle-stream-btn">
+          Trocar tela
+        </button>
+
+        <button type="button" class="overlay-chip-btn" id="overlay-clickthrough-btn">
+          Travar clique (<kbd>Alt+Shift+L</kbd>)
+        </button>
+
+        <button type="button" class="overlay-chip-btn danger" id="overlay-exit-btn">
+          Sair (<kbd>Alt+Shift+O</kbd>)
+        </button>
+      </div>
+    </div>
+
+    <!-- AVISO DE CLIQUE TRAVADO NO OVERLAY -->
+    <div class="clickthrough-banner" id="clickthrough-banner" hidden>
+      Cliques travados para o jogo — aperte <kbd>Alt+Shift+L</kbd> pra destravar
+    </div>
+
+    <!-- CONTEÚDO PRINCIPAL -->
+    <main class="main-workspace">
+      <!-- LOBBY -->
+      <section class="lobby-section" id="lobby-section">
+        <div class="lobby-card">
+          <div class="lobby-header">
+            <h1>Entrar na sala</h1>
+            <p>
+              Use o mesmo código que seus amigos pra entrar na mesma sala.
+            </p>
+          </div>
+
+          <form id="join-room-form" class="lobby-form">
+            <div class="field-group">
+              <label for="nickname-input">Seu nome</label>
+              <input
+                type="text"
+                id="nickname-input"
+                placeholder="Ex: Alex"
+                maxlength="22"
+                required
+              />
+            </div>
+
+            <div class="field-group">
+              <label for="room-code-input">Código da sala</label>
+              <div class="input-with-btn">
+                <input
+                  type="text"
+                  id="room-code-input"
+                  placeholder="Ex: SALA-10"
+                  maxlength="24"
+                  required
+                />
+                <button type="button" class="btn-secondary" id="random-room-btn">
+                  Gerar
+                </button>
+              </div>
+              <small class="field-hint">
+                Se a sala ainda não existir, ela é criada na hora.
+              </small>
+            </div>
+
+            <div class="lobby-actions">
+              <button type="submit" class="btn-primary btn-lg" id="join-room-submit-btn">
+                Entrar
+              </button>
+            </div>
+          </form>
+
+          <div class="lobby-features-grid">
+            <div class="feature-badge">
+              <strong>Atalhos úteis</strong>
+              <span><kbd>Alt+Shift+O</kbd> abre o overlay por cima do jogo</span>
+            </div>
+            <div class="feature-badge">
+              <strong>Travar mouse no overlay</strong>
+              <span><kbd>Alt+Shift+L</kbd> faz o clique atravessar pro jogo</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SALA ATIVA -->
+      <section class="room-section" id="room-section" hidden>
+        <!-- BARRA DE TELAS MINIMIZADAS -->
+        <div class="minimized-dock" id="minimized-dock" hidden>
+          <span class="minimized-dock-label">Minimizadas (pausadas):</span>
+          <div class="minimized-pills-list" id="minimized-pills-list"></div>
+          <button type="button" class="btn-ghost-xs" id="restore-all-streams-btn">
+            Abrir todas
+          </button>
+        </div>
+
+        <!-- PALCO DE VÍDEOS -->
+        <div class="streams-stage layout-grid" id="streams-stage">
+          <div class="empty-stage-card" id="empty-stage-card">
+            <h2>Ninguém está transmitindo ainda</h2>
+            <p>
+              Clique no botão abaixo pra escolher um monitor ou janela de jogo.
+            </p>
+            <div class="empty-stage-actions">
+              <button type="button" class="btn-primary btn-lg" id="empty-start-share-btn">
+                Transmitir tela
+              </button>
+            </div>
+            <div class="connected-friends-preview" id="connected-friends-list"></div>
+          </div>
+
+          <div class="streams-container" id="streams-container"></div>
+        </div>
+
+        <!-- BARRA INFERIOR -->
+        <footer class="bottom-control-bar" id="bottom-control-bar">
+          <div class="control-bar-left">
+            <button type="button" class="btn-primary" id="open-share-modal-btn">
+              Transmitir tela
+            </button>
+
+            <button type="button" class="btn-secondary" id="change-quality-btn" hidden>
+              Qualidade / Trocar tela
+            </button>
+
+            <button type="button" class="btn-danger" id="stop-share-btn" hidden>
+              Parar transmissão
+            </button>
+          </div>
+
+          <div class="control-bar-center">
+            <div class="perf-indicator" id="local-share-status">
+              <span class="perf-dot" id="local-share-dot"></span>
+              <span id="local-share-text">Parado</span>
+            </div>
+
+            <label class="eco-toggle-pill" for="hide-self-preview-toggle">
+              <input type="checkbox" id="hide-self-preview-toggle" />
+              <span>Esconder minha prévia (gasta menos GPU)</span>
+            </label>
+          </div>
+
+          <div class="control-bar-right">
+            <button type="button" class="btn-secondary" id="mute-all-streams-btn">
+              Som das telas: Ligado
+            </button>
+            <button type="button" class="btn-ghost-danger" id="leave-room-btn">
+              Sair da sala
+            </button>
+          </div>
+        </footer>
+      </section>
+    </main>
+
+    <!-- MODAL DE CONFIGURAÇÃO DA TRANSMISSÃO -->
+    <dialog id="share-modal" class="app-dialog">
+      <div class="dialog-content">
+        <header class="dialog-header">
+          <div>
+            <h2>Transmitir tela</h2>
+            <p class="dialog-subtitle">
+              Escolha a tela ou o jogo e a qualidade que preferir.
+            </p>
+          </div>
+          <button type="button" class="icon-close-btn" id="close-share-modal-btn" aria-label="Fechar">X</button>
+        </header>
+
+        <div class="dialog-body">
+          <div class="source-picker-header">
+            <div class="source-tabs" role="tablist">
+              <button type="button" class="source-tab active" data-filter="all" id="tab-source-all">
+                Tudo
+              </button>
+              <button type="button" class="source-tab" data-filter="screen" id="tab-source-screens">
+                Telas inteiras
+              </button>
+              <button type="button" class="source-tab" data-filter="window" id="tab-source-windows">
+                Janelas / Jogos
+              </button>
+            </div>
+            <button type="button" class="btn-secondary btn-sm" id="refresh-sources-btn">
+              Atualizar lista
+            </button>
+          </div>
+
+          <div class="sources-grid" id="sources-grid"></div>
+
+          <div class="audio-and-eco-row">
+            <label class="toggle-card">
+              <input type="checkbox" id="share-system-audio-checkbox" checked />
+              <div>
+                <strong>Enviar som do sistema / jogo</strong>
+                <span>Pega só o áudio do PC. Seu microfone não é enviado.</span>
+              </div>
+            </label>
+
+            <label class="toggle-card">
+              <input type="checkbox" id="modal-eco-preview-checkbox" />
+              <div>
+                <strong>Esconder minha própria tela pra mim</strong>
+                <span>Não desenha sua tela no seu próprio app pra poupar placa de vídeo.</span>
+              </div>
+            </label>
+          </div>
+
+          <div class="presets-section">
+            <h3>Qualidade</h3>
+            <div class="presets-grid" id="presets-grid"></div>
+          </div>
+
+          <details class="advanced-tuning-details" id="advanced-tuning-details">
+            <summary>Configuração manual (Resolução, FPS, Bitrate, Codec)</summary>
+            <div class="advanced-grid">
+              <div class="field-group">
+                <label for="select-resolution">Resolução</label>
+                <select id="select-resolution">
+                  <option value="1280x720">720p (1280x720)</option>
+                  <option value="1920x1080" selected>1080p (1920x1080)</option>
+                  <option value="2560x1440">1440p / 2K (2560x1440)</option>
+                  <option value="3840x2160">4K / Nativo (3840x2160)</option>
+                </select>
+              </div>
+
+              <div class="field-group">
+                <label for="select-fps">FPS</label>
+                <select id="select-fps">
+                  <option value="30">30 FPS</option>
+                  <option value="60" selected>60 FPS</option>
+                  <option value="120">120 FPS</option>
+                </select>
+              </div>
+
+              <div class="field-group">
+                <label for="bitrate-slider">
+                  Bitrate: <strong id="bitrate-value-label">10 Mbps</strong>
+                </label>
+                <input type="range" id="bitrate-slider" min="2" max="40" step="1" value="10" />
+                <small class="field-hint">Aumente se a imagem ficar borrada em movimento rápido.</small>
+              </div>
+
+              <div class="field-group">
+                <label for="select-codec">Codec</label>
+                <select id="select-codec">
+                  <option value="H264" selected>H.264 (Placa de vídeo - Mais leve)</option>
+                  <option value="VP9">VP9</option>
+                  <option value="AV1">AV1</option>
+                </select>
+              </div>
+
+              <div class="field-group">
+                <label for="select-priority">Prioridade</label>
+                <select id="select-priority">
+                  <option value="motion" selected>Manter FPS alto (Jogos)</option>
+                  <option value="detail">Manter nitidez (Texto / Área de trabalho)</option>
+                </select>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <footer class="dialog-footer">
+          <button type="button" class="btn-secondary" id="cancel-share-modal-btn">Cancelar</button>
+          <button type="button" class="btn-primary btn-lg" id="confirm-start-share-btn">
+            Transmitir
+          </button>
+        </footer>
+      </div>
+    </dialog>
+  </div>
+
+  <script src="../node_modules/peerjs/dist/peerjs.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
