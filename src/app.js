@@ -14,7 +14,10 @@ const uiState = {
   selectedSourceName: 'Tela Principal',
   selectedPresetId: 'balanced-60',
   overlayActive: false,
-  overlayClickThrough: false
+  overlayClickThrough: false,
+  controllingPeerId: null,
+  requestingControlPeerId: null,
+  pendingControlRequester: null
 };
 
 const el = {
@@ -40,6 +43,14 @@ const el = {
   overlayClickthroughBtn: document.getElementById('overlay-clickthrough-btn'),
   overlayExitBtn: document.getElementById('overlay-exit-btn'),
   clickthroughBanner: document.getElementById('clickthrough-banner'),
+
+  controlRequestBanner: document.getElementById('control-request-banner'),
+  controlRequestText: document.getElementById('control-request-text'),
+  allowControlBtn: document.getElementById('allow-control-btn'),
+  denyControlBtn: document.getElementById('deny-control-btn'),
+  controlActiveBanner: document.getElementById('control-active-banner'),
+  controlActiveText: document.getElementById('control-active-text'),
+  revokeControlBtn: document.getElementById('revoke-control-btn'),
 
   lobbySection: document.getElementById('lobby-section'),
   joinRoomForm: document.getElementById('join-room-form'),
@@ -115,6 +126,11 @@ const engine = new MultiStreamRoomEngine({
     uiState.minimizedStreams.clear();
     uiState.peersList = [];
     uiState.spotlightStreamId = null;
+    uiState.controllingPeerId = null;
+    uiState.requestingControlPeerId = null;
+    uiState.pendingControlRequester = null;
+    el.controlRequestBanner.hidden = true;
+    el.controlActiveBanner.hidden = true;
     el.streamsContainer.innerHTML = '';
     el.roomSection.hidden = true;
     el.roomToolbar.hidden = true;
@@ -149,6 +165,9 @@ const engine = new MultiStreamRoomEngine({
   onLocalStreamStopped: () => {
     uiState.activeStreams.delete('local');
     uiState.minimizedStreams.delete('local');
+    uiState.pendingControlRequester = null;
+    el.controlRequestBanner.hidden = true;
+    el.controlActiveBanner.hidden = true;
     if (uiState.spotlightStreamId === 'local') {
       uiState.spotlightStreamId = getFirstAvailableStreamId();
     }
@@ -182,6 +201,12 @@ const engine = new MultiStreamRoomEngine({
   onRemoteStreamRemoved: (peerId) => {
     uiState.activeStreams.delete(peerId);
     uiState.minimizedStreams.delete(peerId);
+    if (uiState.controllingPeerId === peerId) {
+      uiState.controllingPeerId = null;
+    }
+    if (uiState.requestingControlPeerId === peerId) {
+      uiState.requestingControlPeerId = null;
+    }
     const card = document.getElementById(`stream-card-${peerId}`);
     if (card) card.remove();
 
@@ -190,6 +215,46 @@ const engine = new MultiStreamRoomEngine({
     }
     updateRoomStatusUI(uiState.peersList);
     syncStreamsStage();
+  },
+
+  onControlRequest: ({ peerId, nickname }) => {
+    uiState.pendingControlRequester = { peerId, nickname: nickname || 'Amigo' };
+    el.controlRequestText.textContent = `${nickname || 'Amigo'} pediu pra controlar seu mouse e teclado`;
+    el.controlRequestBanner.hidden = false;
+  },
+
+  onControlResponse: ({ peerId, nickname, granted }) => {
+    if (uiState.requestingControlPeerId === peerId) {
+      uiState.requestingControlPeerId = null;
+    }
+    if (granted) {
+      uiState.controllingPeerId = peerId;
+      syncStreamsStage();
+      const card = document.getElementById(`stream-card-${peerId}`);
+      const videoEl = card?.querySelector('.stream-video');
+      if (videoEl) {
+        videoEl.focus();
+      }
+    } else {
+      if (uiState.controllingPeerId === peerId) {
+        uiState.controllingPeerId = null;
+      }
+      syncStreamsStage();
+      alert(`${nickname || 'Seu amigo'} recusou o pedido de controle.`);
+    }
+  },
+
+  onControlRevoked: ({ peerId }) => {
+    if (uiState.controllingPeerId === peerId) {
+      uiState.controllingPeerId = null;
+      syncStreamsStage();
+    }
+  },
+
+  onControllerStopped: () => {
+    uiState.pendingControlRequester = null;
+    el.controlRequestBanner.hidden = true;
+    el.controlActiveBanner.hidden = true;
   },
 
   onTelemetryUpdate: ({ streams, activeViewers, minimizedViewers }) => {
@@ -403,6 +468,38 @@ function syncStreamsStage() {
   }
 }
 
+function computeVideoNormalizedCoords(videoEl, clientX, clientY) {
+  const rect = videoEl.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+
+  const vw = videoEl.videoWidth || rect.width;
+  const vh = videoEl.videoHeight || rect.height;
+  const videoRatio = vw / vh;
+  const boxRatio = rect.width / rect.height;
+
+  let renderW = rect.width;
+  let renderH = rect.height;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (boxRatio > videoRatio) {
+    renderW = rect.height * videoRatio;
+    offsetX = (rect.width - renderW) / 2;
+  } else {
+    renderH = rect.width / videoRatio;
+    offsetY = (rect.height - renderH) / 2;
+  }
+
+  const relX = (clientX - rect.left - offsetX) / renderW;
+  const relY = (clientY - rect.top - offsetY) / renderH;
+
+  if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return null;
+  return {
+    nx: Math.round(relX * 10000),
+    ny: Math.round(relY * 10000)
+  };
+}
+
 function createStreamCardElement(info) {
   const card = document.createElement('article');
   card.className = 'stream-card';
@@ -421,7 +518,7 @@ function createStreamCardElement(info) {
     </div>
 
     <div class="stream-video-wrapper">
-      <video class="stream-video" playsinline autoplay></video>
+      <video class="stream-video" tabindex="0" playsinline autoplay></video>
       <div class="eco-hidden-placeholder" hidden>
         <strong>Prévia ocultada pra economizar GPU</strong>
         <span>Seus amigos continuam vendo sua tela normalmente.</span>
@@ -437,6 +534,9 @@ function createStreamCardElement(info) {
       </div>
 
       <div class="stream-actions-group">
+        <button type="button" class="card-action-btn btn-remote-control" ${info.isLocal ? 'hidden' : ''}>
+          Pedir controle
+        </button>
         <button type="button" class="card-action-btn btn-make-spotlight">
           Deixar grande
         </button>
@@ -456,6 +556,7 @@ function createStreamCardElement(info) {
   const videoEl = card.querySelector('.stream-video');
   const muteBtn = card.querySelector('.btn-mute-toggle');
   const volumeSlider = card.querySelector('.stream-volume-slider');
+  const remoteCtrlBtn = card.querySelector('.btn-remote-control');
   const spotlightBtn = card.querySelector('.btn-make-spotlight');
   const singleBtn = card.querySelector('.btn-focus-single');
   const minBtn = card.querySelector('.btn-minimize-stream');
@@ -488,9 +589,115 @@ function createStreamCardElement(info) {
       videoEl.muted = current.muted;
       muteBtn.textContent = current.muted ? 'Mudo' : 'Som';
     });
+
+    remoteCtrlBtn.addEventListener('click', () => {
+      if (uiState.controllingPeerId === info.id) {
+        engine.stopControllingPeer(info.id);
+        uiState.controllingPeerId = null;
+        syncStreamsStage();
+      } else {
+        if (uiState.controllingPeerId) {
+          engine.stopControllingPeer(uiState.controllingPeerId);
+          uiState.controllingPeerId = null;
+        }
+        uiState.requestingControlPeerId = info.id;
+        engine.requestRemoteControl(info.id);
+        syncStreamsStage();
+      }
+    });
+
+    let lastMoveSent = 0;
+    videoEl.addEventListener('mousemove', (e) => {
+      if (uiState.controllingPeerId !== info.id) return;
+      const now = performance.now();
+      if (now - lastMoveSent < 25) return;
+      const coords = computeVideoNormalizedCoords(videoEl, e.clientX, e.clientY);
+      if (!coords) return;
+      lastMoveSent = now;
+      engine.sendRemoteInput(info.id, {
+        action: 'mousemove',
+        nx: coords.nx,
+        ny: coords.ny
+      });
+    });
+
+    videoEl.addEventListener('mousedown', (e) => {
+      if (uiState.controllingPeerId !== info.id) return;
+      videoEl.focus();
+      const coords = computeVideoNormalizedCoords(videoEl, e.clientX, e.clientY);
+      if (!coords) return;
+      const btnMap = { 0: 'left', 1: 'middle', 2: 'right' };
+      const button = btnMap[e.button];
+      if (!button) return;
+      e.preventDefault();
+      engine.sendRemoteInput(info.id, {
+        action: 'mousedown',
+        button,
+        nx: coords.nx,
+        ny: coords.ny
+      });
+    });
+
+    videoEl.addEventListener('mouseup', (e) => {
+      if (uiState.controllingPeerId !== info.id) return;
+      const coords = computeVideoNormalizedCoords(videoEl, e.clientX, e.clientY);
+      const btnMap = { 0: 'left', 1: 'middle', 2: 'right' };
+      const button = btnMap[e.button];
+      if (!button) return;
+      e.preventDefault();
+      engine.sendRemoteInput(info.id, {
+        action: 'mouseup',
+        button,
+        nx: coords ? coords.nx : 5000,
+        ny: coords ? coords.ny : 5000
+      });
+    });
+
+    videoEl.addEventListener('contextmenu', (e) => {
+      if (uiState.controllingPeerId === info.id) {
+        e.preventDefault();
+      }
+    });
+
+    videoEl.addEventListener(
+      'wheel',
+      (e) => {
+        if (uiState.controllingPeerId !== info.id) return;
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 120 : -120;
+        engine.sendRemoteInput(info.id, {
+          action: 'wheel',
+          deltaY: delta
+        });
+      },
+      { passive: false }
+    );
+
+    videoEl.addEventListener('keydown', (e) => {
+      if (uiState.controllingPeerId !== info.id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      engine.sendRemoteInput(info.id, {
+        action: 'keydown',
+        code: e.code,
+        key: e.key
+      });
+    });
+
+    videoEl.addEventListener('keyup', (e) => {
+      if (uiState.controllingPeerId !== info.id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      engine.sendRemoteInput(info.id, {
+        action: 'keyup',
+        code: e.code,
+        key: e.key
+      });
+    });
   }
 
   videoEl.addEventListener('dblclick', () => {
+    if (uiState.controllingPeerId === info.id) return;
     if (uiState.layoutMode === 'spotlight' && uiState.spotlightStreamId === info.id) {
       setLayoutMode('grid');
     } else {
@@ -507,6 +714,10 @@ function createStreamCardElement(info) {
   });
 
   minBtn.addEventListener('click', () => {
+    if (uiState.controllingPeerId === info.id) {
+      engine.stopControllingPeer(info.id);
+      uiState.controllingPeerId = null;
+    }
     closeSpecificStream(info.id);
   });
 
@@ -523,10 +734,26 @@ function createStreamCardElement(info) {
 
 function updateStreamCardElement(card, info) {
   card.classList.toggle('is-spotlight', uiState.spotlightStreamId === info.id);
+  const isControlling = uiState.controllingPeerId === info.id;
+  const isRequesting = uiState.requestingControlPeerId === info.id;
+  card.classList.toggle('is-controlling-remote', isControlling);
+
+  const remoteCtrlBtn = card.querySelector('.btn-remote-control');
+  if (remoteCtrlBtn && !info.isLocal) {
+    remoteCtrlBtn.classList.toggle('controlling', isControlling);
+    if (isControlling) {
+      remoteCtrlBtn.textContent = 'Parar controle';
+    } else if (isRequesting) {
+      remoteCtrlBtn.textContent = 'Pedindo...';
+    } else {
+      remoteCtrlBtn.textContent = 'Pedir controle';
+    }
+  }
 
   const titleLabel = card.querySelector('.stream-title-label');
   const sourceTitle = info.streamMeta?.sourceName ? ` - ${info.streamMeta.sourceName}` : '';
-  titleLabel.textContent = `${info.nickname}${sourceTitle}`;
+  const ctrlTag = isControlling ? ' [CONTROLANDO]' : '';
+  titleLabel.textContent = `${info.nickname}${sourceTitle}${ctrlTag}`;
 
   const videoEl = card.querySelector('.stream-video');
   const ecoPlaceholder = card.querySelector('.eco-hidden-placeholder');
@@ -957,6 +1184,28 @@ function initEvents() {
     openSpecificStream(nextId, true);
   });
 
+  el.allowControlBtn.addEventListener('click', () => {
+    const req = uiState.pendingControlRequester;
+    if (!req) return;
+    el.controlRequestBanner.hidden = true;
+    engine.respondRemoteControl(req.peerId, true);
+    el.controlActiveText.innerHTML = `${req.nickname} está controlando seu PC (aperte <kbd>Alt+Shift+K</kbd> pra cortar na hora)`;
+    el.controlActiveBanner.hidden = false;
+  });
+
+  el.denyControlBtn.addEventListener('click', () => {
+    const req = uiState.pendingControlRequester;
+    uiState.pendingControlRequester = null;
+    el.controlRequestBanner.hidden = true;
+    if (req) {
+      engine.respondRemoteControl(req.peerId, false);
+    }
+  });
+
+  el.revokeControlBtn.addEventListener('click', () => {
+    engine.revokeRemoteControl();
+  });
+
   if (window.electronAPI) {
     window.electronAPI.onOverlayStateChanged((state) => {
       applyOverlayStateToDOM(state);
@@ -965,6 +1214,17 @@ function initEvents() {
     window.electronAPI.onToggleMuteAllShortcut(() => {
       toggleMuteAllStreams();
     });
+
+    if (window.electronAPI.onRevokeControlShortcut) {
+      window.electronAPI.onRevokeControlShortcut(() => {
+        engine.revokeRemoteControl();
+        if (uiState.controllingPeerId) {
+          engine.stopControllingPeer(uiState.controllingPeerId);
+          uiState.controllingPeerId = null;
+          syncStreamsStage();
+        }
+      });
+    }
 
     if (window.electronAPI.onUpdateProgress) {
       window.electronAPI.onUpdateProgress(({ percent, stage }) => {

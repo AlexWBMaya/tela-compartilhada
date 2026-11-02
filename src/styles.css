@@ -898,6 +898,45 @@ kbd {
   color: #fff;
 }
 
+.card-action-btn.controlling {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.stream-card.is-controlling-remote {
+  border: 2px solid var(--accent);
+}
+
+.stream-card.is-controlling-remote .stream-video {
+  outline: none;
+  cursor: default;
+}
+
+.remote-control-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-subtle);
+  background: #1b2838;
+  color: #fff;
+}
+
+.remote-control-banner.active {
+  background: #3a1216;
+  border-bottom-color: var(--danger);
+}
+
+.remote-control-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* ============================================================================
    BARRA INFERIOR
    ============================================================================ */

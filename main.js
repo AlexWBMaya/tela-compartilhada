@@ -326,6 +326,134 @@ async function downloadAndInstallUpdate() {
 }
 
 // ============================================================================
+// CONTROLE REMOTO NATIVO DO WINDOWS (USER32.DLL SEM DRIVERS EXTERNOS)
+// ============================================================================
+let inputWorker = null;
+
+function ensureInputWorker() {
+  if (inputWorker && !inputWorker.killed) {
+    return inputWorker;
+  }
+
+  const psScript = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WinInput {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+  public static void Move10k(int nx, int ny) {
+    int w = GetSystemMetrics(0);
+    int h = GetSystemMetrics(1);
+    int x = (nx * w) / 10000;
+    int y = (ny * h) / 10000;
+    SetCursorPos(x, y);
+  }
+}
+"@
+[WinInput]::SetProcessDPIAware() | Out-Null
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  $p = $line.Split(' ')
+  switch ($p[0]) {
+    'M' {
+      [WinInput]::Move10k([int]$p[1], [int]$p[2])
+    }
+    'MD' {
+      [WinInput]::Move10k([int]$p[1], [int]$p[2])
+      $btn = [int]$p[3]
+      $flag = if ($btn -eq 2) { 0x0008 } elseif ($btn -eq 1) { 0x0020 } else { 0x0002 }
+      [WinInput]::mouse_event([uint32]$flag, 0, 0, 0, [UIntPtr]::Zero)
+    }
+    'MU' {
+      [WinInput]::Move10k([int]$p[1], [int]$p[2])
+      $btn = [int]$p[3]
+      $flag = if ($btn -eq 2) { 0x0010 } elseif ($btn -eq 1) { 0x0040 } else { 0x0004 }
+      [WinInput]::mouse_event([uint32]$flag, 0, 0, 0, [UIntPtr]::Zero)
+    }
+    'MW' {
+      [WinInput]::mouse_event(0x0800, 0, 0, [int]$p[1], [UIntPtr]::Zero)
+    }
+    'KD' {
+      $vk = [int]$p[1]
+      if ($vk -gt 0 -and $vk -lt 255) {
+        [WinInput]::keybd_event([byte]$vk, 0, 0, [UIntPtr]::Zero)
+      }
+    }
+    'KU' {
+      $vk = [int]$p[1]
+      if ($vk -gt 0 -and $vk -lt 255) {
+        [WinInput]::keybd_event([byte]$vk, 0, 2, [UIntPtr]::Zero)
+      }
+    }
+  }
+}
+`;
+
+  inputWorker = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psScript],
+    {
+      stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true
+    }
+  );
+
+  inputWorker.on('exit', () => {
+    inputWorker = null;
+  });
+
+  inputWorker.on('error', () => {
+    inputWorker = null;
+  });
+
+  return inputWorker;
+}
+
+function sendInputCommand(line) {
+  const worker = ensureInputWorker();
+  if (worker && worker.stdin && !worker.stdin.destroyed) {
+    try {
+      worker.stdin.write(line + '\n');
+    } catch (_) {}
+  }
+}
+
+function executeRemoteInputEvent(evt) {
+  if (!evt || typeof evt !== 'object') return;
+  const nx = Math.max(0, Math.min(10000, Math.round((Number(evt.nx) || 0) * 10000)));
+  const ny = Math.max(0, Math.min(10000, Math.round((Number(evt.ny) || 0) * 10000)));
+
+  switch (evt.action) {
+    case 'mousemove':
+      sendInputCommand(`M ${nx} ${ny}`);
+      break;
+    case 'mousedown':
+      sendInputCommand(`MD ${nx} ${ny} ${Number(evt.button) || 0}`);
+      break;
+    case 'mouseup':
+      sendInputCommand(`MU ${nx} ${ny} ${Number(evt.button) || 0}`);
+      break;
+    case 'wheel': {
+      const wheelDelta = (Number(evt.deltaY) || 0) > 0 ? -120 : 120;
+      sendInputCommand(`MW ${wheelDelta}`);
+      break;
+    }
+    case 'keydown':
+      sendInputCommand(`KD ${Number(evt.keyCode) || 0}`);
+      break;
+    case 'keyup':
+      sendInputCommand(`KU ${Number(evt.keyCode) || 0}`);
+      break;
+    default:
+      break;
+  }
+}
+
+// ============================================================================
 // ATALHOS GLOBAIS
 // ============================================================================
 function registerGlobalShortcuts() {
@@ -359,6 +487,12 @@ function registerGlobalShortcuts() {
   globalShortcut.register('Alt+Shift+M', () => {
     if (!mainWindow) return;
     mainWindow.webContents.send('shortcut:toggle-mute-all');
+  });
+
+  // Atalho de segurança para cortar o controle remoto imediatamente de qualquer lugar
+  globalShortcut.register('Alt+Shift+K', () => {
+    if (!mainWindow) return;
+    mainWindow.webContents.send('shortcut:revoke-remote-control');
   });
 }
 
@@ -496,6 +630,10 @@ ipcMain.handle('updater:install', async () => {
   return downloadAndInstallUpdate();
 });
 
+ipcMain.on('remote-input:execute', (_event, evt) => {
+  executeRemoteInputEvent(evt);
+});
+
 app.whenReady().then(() => {
   createMainWindow();
   registerGlobalShortcuts();
@@ -509,6 +647,11 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  if (inputWorker && !inputWorker.killed) {
+    try {
+      inputWorker.kill();
+    } catch (_) {}
+  }
 });
 
 app.on('window-all-closed', () => {

@@ -98,6 +98,7 @@ export class MultiStreamRoomEngine {
     this.localStream = null;
     this.isSharing = false;
     this.smartScalingEnabled = true;
+    this.allowedControllerPeerId = null;
 
     this.qualityConfig = {
       ...QUALITY_PRESETS['balanced-60'],
@@ -397,6 +398,53 @@ export class MultiStreamRoomEngine {
         break;
       }
 
+      case 'control-request': {
+        if (this.isSharing) {
+          this.callbacks.onControlRequest?.({
+            peerId: remotePeerId,
+            nickname: peerEntry.nickname
+          });
+        } else {
+          this._sendToPeer(remotePeerId, {
+            type: 'control-response',
+            granted: false
+          });
+        }
+        break;
+      }
+
+      case 'control-response': {
+        this.callbacks.onControlResponse?.({
+          peerId: remotePeerId,
+          nickname: peerEntry.nickname,
+          granted: Boolean(msg.granted)
+        });
+        break;
+      }
+
+      case 'control-revoke': {
+        this.callbacks.onControlRevoked?.({
+          peerId: remotePeerId,
+          nickname: peerEntry.nickname
+        });
+        break;
+      }
+
+      case 'control-stop': {
+        if (this.allowedControllerPeerId === remotePeerId) {
+          this.allowedControllerPeerId = null;
+          this.callbacks.onControllerStopped?.({ peerId: remotePeerId });
+        }
+        break;
+      }
+
+      case 'remote-input': {
+        if (this.isSharing && this.allowedControllerPeerId === remotePeerId && msg.evt) {
+          window.electronAPI?.executeRemoteInput(msg.evt);
+        }
+        break;
+      }
+
       default:
         break;
     }
@@ -456,6 +504,11 @@ export class MultiStreamRoomEngine {
   }
 
   _handlePeerDisconnected(remotePeerId) {
+    if (this.allowedControllerPeerId === remotePeerId) {
+      this.allowedControllerPeerId = null;
+      this.callbacks.onControllerStopped?.({ peerId: remotePeerId });
+    }
+
     const outCall = this.outgoingCalls.get(remotePeerId);
     if (outCall) {
       try { outCall.close(); } catch (_) {}
@@ -500,6 +553,54 @@ export class MultiStreamRoomEngine {
       type: 'viewer-visibility',
       visible: Boolean(visible),
       tier
+    });
+  }
+
+  requestRemoteControl(remotePeerId) {
+    this._sendToPeer(remotePeerId, {
+      type: 'control-request'
+    });
+  }
+
+  respondRemoteControl(remotePeerId, granted) {
+    if (granted) {
+      if (this.allowedControllerPeerId && this.allowedControllerPeerId !== remotePeerId) {
+        this._sendToPeer(this.allowedControllerPeerId, {
+          type: 'control-revoke'
+        });
+      }
+      this.allowedControllerPeerId = remotePeerId;
+    } else if (this.allowedControllerPeerId === remotePeerId) {
+      this.allowedControllerPeerId = null;
+    }
+
+    this._sendToPeer(remotePeerId, {
+      type: 'control-response',
+      granted: Boolean(granted)
+    });
+  }
+
+  revokeRemoteControl() {
+    if (this.allowedControllerPeerId) {
+      const prev = this.allowedControllerPeerId;
+      this.allowedControllerPeerId = null;
+      this._sendToPeer(prev, {
+        type: 'control-revoke'
+      });
+    }
+    this.callbacks.onControllerStopped?.();
+  }
+
+  stopControllingPeer(remotePeerId) {
+    this._sendToPeer(remotePeerId, {
+      type: 'control-stop'
+    });
+  }
+
+  sendRemoteInput(remotePeerId, evt) {
+    this._sendToPeer(remotePeerId, {
+      type: 'remote-input',
+      evt
     });
   }
 
@@ -681,6 +782,10 @@ export class MultiStreamRoomEngine {
   }
 
   stopScreenShare() {
+    if (this.allowedControllerPeerId) {
+      this.revokeRemoteControl();
+    }
+
     if (this.localStream) {
       this.localStream.getTracks().forEach((t) => t.stop());
       this.localStream = null;

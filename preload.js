@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
 
+  executeRemoteInput: (evt) => ipcRenderer.send('remote-input:execute', evt),
+
   onUpdateProgress: (callback) => {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('updater:progress', listener);
@@ -38,5 +40,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = () => callback();
     ipcRenderer.on('shortcut:toggle-mute-all', listener);
     return () => ipcRenderer.removeListener('shortcut:toggle-mute-all', listener);
+  },
+
+  onRevokeControlShortcut: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('shortcut:revoke-remote-control', listener);
+    return () => ipcRenderer.removeListener('shortcut:revoke-remote-control', listener);
   }
 });

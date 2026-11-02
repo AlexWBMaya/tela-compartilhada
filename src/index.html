@@ -53,7 +53,7 @@
         </button>
 
         <button type="button" class="version-check-btn" id="check-update-btn">
-          v1.1.0
+          v1.2.0
         </button>
 
         <button type="button" class="overlay-trigger-btn" id="toggle-overlay-btn">
@@ -96,6 +96,23 @@
     <!-- AVISO DE CLIQUE TRAVADO NO OVERLAY -->
     <div class="clickthrough-banner" id="clickthrough-banner" hidden>
       Cliques travados para o jogo — aperte <kbd>Alt+Shift+L</kbd> pra destravar
+    </div>
+
+    <!-- PEDIDO DE CONTROLE REMOTO -->
+    <div class="remote-control-banner request" id="control-request-banner" hidden>
+      <span id="control-request-text">Amigo pediu pra controlar seu mouse e teclado</span>
+      <div class="remote-control-banner-actions">
+        <button type="button" class="btn-primary btn-sm" id="allow-control-btn">Permitir</button>
+        <button type="button" class="btn-secondary btn-sm" id="deny-control-btn">Recusar</button>
+      </div>
+    </div>
+
+    <!-- AVISO DE CONTROLE REMOTO ATIVO -->
+    <div class="remote-control-banner active" id="control-active-banner" hidden>
+      <span id="control-active-text">Amigo está controlando seu PC (aperte <kbd>Alt+Shift+K</kbd> pra cortar na hora)</span>
+      <div class="remote-control-banner-actions">
+        <button type="button" class="btn-danger btn-sm" id="revoke-control-btn">Cortar controle</button>
+      </div>
     </div>
 
     <!-- CONTEÚDO PRINCIPAL -->
