@@ -10,18 +10,7 @@ const ICE_SERVERS = [
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'stun:stun4.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'stun:openrelay.metered.ca:80' },
-  { urls: 'stun:openrelay.metered.ca:443' },
-  {
-    urls: [
-      'turn:openrelay.metered.ca:80',
-      'turn:openrelay.metered.ca:443',
-      'turn:openrelay.metered.ca:443?transport=tcp'
-    ],
-    username: 'openrelayproject',
-    credential: 'openrelayproject'
-  }
+  { urls: 'stun:stun.cloudflare.com:3478' }
 ];
 
 export const QUALITY_PRESETS = {
@@ -377,10 +366,28 @@ export class MultiStreamRoomEngine {
   _discoverRoomPeers() {
     if (!this.peer || this.peer.destroyed || !this.roomCode) return;
 
-    const targets = new Set([
-      ...this.getRoomSlotIds(this.roomCode),
-      ...this._getKnownRoomPeers(this.roomCode)
-    ]);
+    const slots = this.getRoomSlotIds(this.roomCode);
+    const mySlotIdx = slots.indexOf(this.myPeerId);
+    const knownPeers = this._getKnownRoomPeers(this.roomCode);
+
+    const targets = new Set();
+
+    // 1. Tenta reconectar aos peers conhecidos salvos da sessão anterior
+    for (const pid of knownPeers) {
+      if (pid && pid !== this.myPeerId) targets.add(pid);
+    }
+
+    // 2. Regra determinística anti-colisão (evita discagem cruzada simultânea):
+    // Membros com slot > 0 conectam aos slots menores (< mySlotIdx), incluindo sempre o host (slot 0).
+    // O host (slot 0) não precisa discar para slots vazios no escuro: ele apenas aguarda conexões dos membros.
+    if (mySlotIdx > 0) {
+      for (let i = 0; i < mySlotIdx; i++) {
+        targets.add(slots[i]);
+      }
+    } else if (mySlotIdx < 0) {
+      // Se for um ID aleatório (membro fallback), tenta sempre o host
+      targets.add(slots[0]);
+    }
 
     for (const targetPeerId of targets) {
       if (!targetPeerId || targetPeerId === this.myPeerId) continue;
@@ -414,7 +421,8 @@ export class MultiStreamRoomEngine {
 
     const pending = this.pendingConns.get(remotePeerId);
     if (pending) {
-      if (pending.open || Date.now() - (pending._ssproCreatedAt || 0) < 3200) {
+      // Se a conexão já abriu ou foi iniciada há menos de 15 segundos, deixa concluir sem abortar
+      if (pending.open || Date.now() - (pending._ssproCreatedAt || 0) < 15000) {
         return;
       }
       this.pendingConns.delete(remotePeerId);
@@ -444,18 +452,11 @@ export class MultiStreamRoomEngine {
     this._registerDataConnection(conn);
   }
 
-  _purgeDuplicatePeers(activePeerId, clientId, nickname) {
-    const now = Date.now();
+  _purgeDuplicatePeers(activePeerId, clientId) {
     for (const [pid, info] of Array.from(this.peers.entries())) {
       if (activePeerId && pid === activePeerId) continue;
-      const sameClient = clientId && info.clientId && info.clientId === clientId;
-      const sameNickStale =
-        nickname &&
-        info.nickname &&
-        info.nickname.toLowerCase() === nickname.toLowerCase() &&
-        (!info.conn?.open || now - (info.lastSeen || 0) > 2200);
-
-      if (sameClient || sameNickStale) {
+      const sameClient = Boolean(clientId && info.clientId && info.clientId === clientId);
+      if (sameClient) {
         this._handlePeerDisconnected(pid);
       }
     }
@@ -481,7 +482,10 @@ export class MultiStreamRoomEngine {
             }
           }
         }
-        this._handlePeerDisconnected(remotePeerId);
+        // Só desconecta se esta era a conexão ativa do peer e não resta nenhuma aberta
+        if (peerEntry.conn === conn) {
+          this._handlePeerDisconnected(remotePeerId);
+        }
       }
     };
     pc.addEventListener('iceconnectionstatechange', checkState);
@@ -517,7 +521,7 @@ export class MultiStreamRoomEngine {
           conn.close();
         } catch (_) {}
       }
-    }, 4500);
+    }, 15000);
 
     conn.on('open', () => {
       clearTimeout(pendingTimeout);
@@ -529,7 +533,7 @@ export class MultiStreamRoomEngine {
       const incomingSessionId = conn.metadata?.sessionId || null;
       const incomingNick = conn.metadata?.nickname || 'Amigo';
 
-      this._purgeDuplicatePeers(remotePeerId, incomingClientId, incomingNick);
+      this._purgeDuplicatePeers(remotePeerId, incomingClientId);
 
       let peerEntry = this.peers.get(remotePeerId);
       if (!peerEntry) {
@@ -665,7 +669,7 @@ export class MultiStreamRoomEngine {
         if (msg.sessionId) peerEntry.sessionId = msg.sessionId;
         peerEntry.sharing = Boolean(msg.sharing);
         peerEntry.streamMeta = msg.streamMeta || null;
-        this._purgeDuplicatePeers(remotePeerId, peerEntry.clientId, peerEntry.nickname);
+        this._purgeDuplicatePeers(remotePeerId, peerEntry.clientId);
         this._saveKnownRoomPeers();
         if (this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
           this._callPeerWithScreen(remotePeerId);
@@ -704,7 +708,7 @@ export class MultiStreamRoomEngine {
       case 'peer-leaving': {
         this._handlePeerDisconnected(remotePeerId);
         if (msg.clientId) {
-          this._purgeDuplicatePeers(null, msg.clientId, null);
+          this._purgeDuplicatePeers(null, msg.clientId);
         }
         break;
       }
@@ -713,7 +717,11 @@ export class MultiStreamRoomEngine {
         if (Array.isArray(msg.peers)) {
           for (const item of msg.peers) {
             if (item.peerId && item.peerId !== this.myPeerId && !this.peers.has(item.peerId)) {
-              this._connectToPeer(item.peerId);
+              // Tie-breaker para evitar discagem simultânea entre membros comuns:
+              // Conecta apenas se o meu peerId for maior
+              if (this.myPeerId > item.peerId) {
+                this._connectToPeer(item.peerId);
+              }
             }
           }
           this._saveKnownRoomPeers();
@@ -824,7 +832,7 @@ export class MultiStreamRoomEngine {
     mediaConn.on('stream', (remoteStream) => {
       const incClientId = mediaConn.metadata?.clientId || null;
       const incNick = mediaConn.metadata?.nickname || 'Amigo';
-      this._purgeDuplicatePeers(remotePeerId, incClientId, incNick);
+      this._purgeDuplicatePeers(remotePeerId, incClientId);
 
       let peerEntry = this.peers.get(remotePeerId);
       if (!peerEntry) {
@@ -1560,7 +1568,7 @@ export class MultiStreamRoomEngine {
             pc.connectionState === 'failed' ||
             pc.connectionState === 'closed');
 
-        if (pcDead || now - (peerEntry.lastSeen || now) > 5500) {
+        if (pcDead || now - (peerEntry.lastSeen || now) > 18000) {
           this._handlePeerDisconnected(remotePeerId);
           continue;
         }

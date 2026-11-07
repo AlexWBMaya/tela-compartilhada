@@ -1,6 +1,6 @@
 {
   "name": "tela-compartilhada",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Aplicativo para compartilhar tela com amigos",
   "main": "main.js",
   "scripts": {
