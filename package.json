@@ -6,8 +6,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build-exe": "electron-builder --win portable",
-    "build-linux": "electron-builder --linux AppImage"
+    "build-exe": "electron-builder --win portable -c.publish=never",
+    "build-linux": "electron-builder --linux AppImage -c.publish=never"
   },
   "author": "Amigos",
   "license": "MIT",
