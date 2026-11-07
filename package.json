@@ -1,12 +1,13 @@
 {
   "name": "tela-compartilhada",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Aplicativo para compartilhar tela com amigos",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build-exe": "electron-builder --win portable"
+    "build-exe": "electron-builder --win portable",
+    "build-linux": "electron-builder --linux AppImage"
   },
   "author": "Amigos",
   "license": "MIT",
@@ -35,6 +36,16 @@
     },
     "portable": {
       "artifactName": "TelaCompartilhada.exe"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Network",
+      "artifactName": "TelaCompartilhada.AppImage",
+      "executableArgs": [
+        "--no-sandbox"
+      ]
     }
   }
 }

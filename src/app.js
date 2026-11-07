@@ -1082,7 +1082,7 @@ function getSelectedQualityConfig() {
   const height = Number(hStr) || 1080;
   const fps = Number(el.selectFps.value) || 60;
   const bitrateMbps = Number(el.bitrateSlider.value) || 10;
-  const codec = el.selectCodec.value || 'H264';
+  const codec = el.selectCodec.value || 'VP9';
   const contentHint = el.selectPriority.value || 'motion';
   const audioTargetSourceId = el.selectAudioTarget?.value || 'active';
 

@@ -23,7 +23,7 @@ Como é um projeto caseiro e sem servidores pagos por trás, ele tem algumas lim
 - **Não tem chat de voz integrado:** O programa serve exclusivamente pra compartilhar a tela e o som do jogo. Pra conversar por voz, ainda precisa deixar a call do Discord (ou outro programa) aberta no fundo.
 - **Pode ter bloqueio de rede (NAT / CGNAT):** Em algumas operadoras de internet com bloqueio mais fechado, a conexão direta entre dois computadores pode falhar por não ter um servidor intermediário (TURN) pago.
 - **Depende do servidor público do PeerJS pra conectar:** O vídeo não passa por servidor nenhum, mas o "encontro" inicial da sala usa o servidor gratuito do PeerJS. Se esse serviço estiver fora do ar ou instável no dia, pode demorar pra achar a sala.
-- **Funciona apenas no Windows:** Tanto o executável quanto o sistema que isola o áudio dos processos (WASAPI) e o controle remoto usam recursos nativos do Windows. Não tem versão pra Linux, Mac ou celular.
+- **Linux (AppImage) tem algumas diferenças:** Existe uma versão nativa `TelaCompartilhada.AppImage` (sem Wine/Proton), com atualização em 1 clique e compatível com salas de quem usa Windows. Limitações no Linux: o controle remoto depende do `xdotool` instalado (X11/XWayland) e o áudio do jogo/janela ainda não é capturado. Não tem versão pra Mac ou celular.
 - **Aviso do Windows Defender na primeira vez:** Como o executável não tem assinatura digital paga da Microsoft, o Windows SmartScreen pode exibir a tela de "O Windows protegeu o computador" quando você baixa. É só clicar em "Mais informações" e depois em "Executar assim mesmo".
 
 ## Como baixar e usar
@@ -35,6 +35,8 @@ Se você só quer usar o programa com seus amigos, não precisa mexer com códig
 3. Abra o arquivo, escolha seu nome, digite o código da sala combinado com seus amigos e clique em **Entrar**.
 
 Por ser portátil, não precisa instalar nada no Windows.
+
+**Linux:** baixe `TelaCompartilhada.AppImage` na mesma página, dê permissão de execução (`chmod +x TelaCompartilhada.AppImage`) e abra. Depois disso, as atualizações também são em 1 clique.
 
 ## Atalhos de teclado
 

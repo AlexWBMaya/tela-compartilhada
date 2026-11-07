@@ -8,7 +8,20 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' }
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:openrelay.metered.ca:80' },
+  { urls: 'stun:openrelay.metered.ca:443' },
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+      'turn:openrelay.metered.ca:443?transport=tcp'
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
 ];
 
 export const QUALITY_PRESETS = {
@@ -21,7 +34,7 @@ export const QUALITY_PRESETS = {
     height: 720,
     fps: 60,
     bitrateMbps: 4,
-    codec: 'H264',
+    codec: 'VP9',
     contentHint: 'motion',
     degradationPreference: 'maintain-framerate'
   },
@@ -34,7 +47,7 @@ export const QUALITY_PRESETS = {
     height: 1080,
     fps: 60,
     bitrateMbps: 10,
-    codec: 'H264',
+    codec: 'VP9',
     contentHint: 'motion',
     degradationPreference: 'maintain-framerate'
   },
@@ -47,7 +60,7 @@ export const QUALITY_PRESETS = {
     height: 1080,
     fps: 60,
     bitrateMbps: 18,
-    codec: 'H264',
+    codec: 'VP9',
     contentHint: 'motion',
     degradationPreference: 'maintain-framerate'
   },
@@ -60,7 +73,7 @@ export const QUALITY_PRESETS = {
     height: 1440,
     fps: 60,
     bitrateMbps: 25,
-    codec: 'H264',
+    codec: 'VP9',
     contentHint: 'motion',
     degradationPreference: 'maintain-framerate'
   },
@@ -73,7 +86,7 @@ export const QUALITY_PRESETS = {
     height: 1440,
     fps: 120,
     bitrateMbps: 35,
-    codec: 'H264',
+    codec: 'VP9',
     contentHint: 'motion',
     degradationPreference: 'maintain-framerate'
   }
@@ -1184,7 +1197,22 @@ export class MultiStreamRoomEngine {
         audio: useFallbackSystemLoopback
       });
     } catch (err) {
-      console.warn('getDisplayMedia falhou, usando fallback desktopCapturer getUserMedia:', err);
+      console.warn('getDisplayMedia falhou, tentando novamente sem áudio de sistema:', err);
+      // Em alguns sistemas (ex.: Linux) o pedido de áudio de sistema não é suportado
+      if (useFallbackSystemLoopback) {
+        try {
+          newStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: { ideal: width, max: width },
+              height: { ideal: height, max: height },
+              frameRate: { ideal: fps, max: fps }
+            },
+            audio: false
+          });
+        } catch (retryErr) {
+          console.warn('getDisplayMedia sem áudio também falhou, usando fallback desktopCapturer getUserMedia:', retryErr);
+        }
+      }
     }
 
     // 2ª tentativa (Fallback direto por sourceId via chromeMediaSource: 'desktop')
@@ -1383,7 +1411,7 @@ export class MultiStreamRoomEngine {
     this.outgoingCalls.set(remotePeerId, call);
 
     const applyParams = () => {
-      this._applyCodecPreference(call.peerConnection, this.qualityConfig.codec);
+      this._applyCodecPreference(call.peerConnection, this.qualityConfig.codec || 'VP9');
       this._applyEncodingForPeer(remotePeerId);
     };
 
@@ -1400,7 +1428,7 @@ export class MultiStreamRoomEngine {
     setTimeout(() => this._applyEncodingForPeer(remotePeerId), 2000);
   }
 
-  _applyCodecPreference(pc, preferredCodec = 'H264') {
+  _applyCodecPreference(pc, preferredCodec = 'VP9') {
     if (!pc || !window.RTCRtpSender?.getCapabilities) return;
     try {
       const capabilities = RTCRtpSender.getCapabilities('video');
@@ -1439,6 +1467,8 @@ export class MultiStreamRoomEngine {
     if (!pc) return;
 
     const peerEntry = this.peers.get(remotePeerId);
+    // IMPORTANTE: isVisibleOnViewer inicia como TRUE para que streams novas nunca fiquem
+    // travadas em 0.0 Mbps / tela preta por dessincronização de eventos
     const isVisibleOnViewer = peerEntry ? peerEntry.viewerVisibility !== false : true;
     const viewerTier = peerEntry?.viewerTier || 'high';
 
@@ -1457,7 +1487,7 @@ export class MultiStreamRoomEngine {
             this.qualityConfig.degradationPreference || 'maintain-framerate';
 
           const encoding = params.encodings[0];
-          // Pausa Inteligente: Se o amigo minimizou esta tela, desativa o envio de vídeo para ele!
+          // Mantém ativo a menos que o peer explicitamente minimize
           encoding.active = isVisibleOnViewer;
 
           if (isVisibleOnViewer) {

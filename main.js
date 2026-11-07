@@ -9,15 +9,43 @@ const GITHUB_REPO = 'AlexWBMaya/tela-compartilhada';
 // ============================================================================
 // OTIMIZAÇÕES DE HARDWARE E PERFORMANCE PARA JOGOS (ZERO-COPY & GPU ENCODE)
 // ============================================================================
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
-app.commandLine.appendSwitch('enable-accelerated-video-decode');
-app.commandLine.appendSwitch('enable-accelerated-video-encode');
+function isRunningUnderWine() {
+  if (process.platform !== 'win32') return false;
+  if (process.env.WINEUSERNAME || process.env.WINELOADERNOEXEC || process.env.WINEPREFIX) {
+    return true;
+  }
+  try {
+    if (fs.existsSync('Z:\\proc\\version') || fs.existsSync('/proc/version')) {
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+const underWine = isRunningUnderWine();
+
+if (underWine) {
+  // Sob o Wine/Proton (ex.: Faugus), a decodificação DXVA do Chromium quebra e causa tela preta.
+  // Desativar a GPU força a decodificação por software (CPU/VP9), que funciona perfeitamente!
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+} else {
+  app.commandLine.appendSwitch('enable-gpu-rasterization');
+  app.commandLine.appendSwitch('enable-zero-copy');
+  app.commandLine.appendSwitch('ignore-gpu-blocklist');
+  app.commandLine.appendSwitch('enable-accelerated-video-decode');
+  app.commandLine.appendSwitch('enable-accelerated-video-encode');
+}
+
 app.commandLine.appendSwitch('enable-features', 'VaapiVideoDecoder,VaapiVideoEncoder,PlatformHEVCEncoderSupport,WebRTCPipeWireCapturer');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
+if (process.platform === 'linux') {
+  // Usa Wayland nativo quando disponível (necessário para captura de tela via PipeWire)
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+}
 
 let mainWindow = null;
 let overlayState = {
@@ -77,7 +105,12 @@ function createMainWindow() {
       }
 
       const response = { video: chosenSource };
-      if (pendingCaptureConfig.includeSystemAudio && pendingCaptureConfig.useFallbackSystemLoopback) {
+      // 'loopback' (áudio do sistema) só existe no Windows; no Linux o áudio não é capturado por aqui
+      if (
+        process.platform === 'win32' &&
+        pendingCaptureConfig.includeSystemAudio &&
+        pendingCaptureConfig.useFallbackSystemLoopback
+      ) {
         response.audio = 'loopback';
       }
       callback(response);
@@ -251,17 +284,23 @@ async function checkForGitHubUpdates() {
     const latestTag = release.tag_name || release.name || '';
     const latestVersion = latestTag.replace(/^v/i, '');
     const assets = Array.isArray(release.assets) ? release.assets : [];
-    const exeAsset =
-      assets.find((a) => a.name && a.name.toLowerCase() === 'telacompartilhada.exe') ||
-      assets.find((a) => a.name && a.name.toLowerCase().endsWith('.exe'));
+    const lowerName = (a) => String((a && a.name) || '').toLowerCase();
 
-    const updateAvailable = Boolean(exeAsset && isNewerVersion(latestVersion, currentVersion));
+    // Windows atualiza pelo .exe; Linux atualiza pelo .AppImage (cada um só enxerga o seu arquivo)
+    const targetAsset =
+      process.platform === 'linux'
+        ? assets.find((a) => lowerName(a) === 'telacompartilhada.appimage') ||
+          assets.find((a) => lowerName(a).endsWith('.appimage'))
+        : assets.find((a) => lowerName(a) === 'telacompartilhada.exe') ||
+          assets.find((a) => lowerName(a).endsWith('.exe'));
+
+    const updateAvailable = Boolean(targetAsset && isNewerVersion(latestVersion, currentVersion));
 
     latestUpdateInfo = {
       updateAvailable,
       currentVersion,
       latestVersion: latestVersion || currentVersion,
-      downloadUrl: exeAsset ? exeAsset.browser_download_url : null,
+      downloadUrl: targetAsset ? targetAsset.browser_download_url : null,
       releaseName: release.name || latestTag
     };
 
@@ -284,8 +323,12 @@ async function downloadAndInstallUpdate() {
     }
   }
 
+  const isLinux = process.platform === 'linux';
   const tempDir = app.getPath('temp');
-  const downloadedExe = path.join(tempDir, `TelaCompartilhada_update_${Date.now()}.exe`);
+  const downloadedExe = path.join(
+    tempDir,
+    `TelaCompartilhada_update_${Date.now()}${isLinux ? '.AppImage' : '.exe'}`
+  );
 
   await downloadFileWithProgress(latestUpdateInfo.downloadUrl, downloadedExe, (percent) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -295,6 +338,57 @@ async function downloadAndInstallUpdate() {
 
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('updater:progress', { percent: 100, stage: 'installing' });
+  }
+
+  // ---- Linux: substitui o .AppImage em uso, dá permissão de execução e reabre ----
+  if (isLinux) {
+    // $APPIMAGE aponta para o arquivo exato que o usuário abriu
+    const targetAppImage = process.env.APPIMAGE;
+    if (!targetAppImage) {
+      try {
+        fs.unlinkSync(downloadedExe);
+      } catch (_) {}
+      throw new Error(
+        'A atualização automática no Linux só funciona quando o app é aberto pelo arquivo .AppImage.'
+      );
+    }
+
+    try {
+      fs.chmodSync(downloadedExe, 0o755);
+    } catch (_) {}
+
+    const updaterSh = path.join(tempDir, `tc_updater_${Date.now()}.sh`);
+    const shContent = [
+      '#!/bin/sh',
+      'SRC="$1"',
+      'DST="$2"',
+      'i=0',
+      'while [ $i -lt 25 ]; do',
+      '  sleep 1',
+      '  # "mv" falha enquanto o AppImage antigo ainda estiver em execução (text file busy)',
+      '  if mv -f "$SRC" "$DST" 2>/dev/null; then break; fi',
+      '  i=$((i+1))',
+      'done',
+      '[ -f "$SRC" ] && cp -f "$SRC" "$DST" && rm -f "$SRC"',
+      'chmod +x "$DST"',
+      'nohup "$DST" >/dev/null 2>&1 &',
+      'rm -f "$0"',
+      ''
+    ].join('\n');
+
+    fs.writeFileSync(updaterSh, shContent, { encoding: 'utf8', mode: 0o755 });
+
+    const shChild = spawn('/bin/sh', [updaterSh, downloadedExe, targetAppImage], {
+      detached: true,
+      stdio: 'ignore'
+    });
+    shChild.unref();
+
+    setTimeout(() => {
+      app.quit();
+    }, 400);
+
+    return true;
   }
 
   // Determina qual arquivo .exe substituir (PORTABLE_EXECUTABLE_FILE quando aberto pelo portátil)
@@ -440,8 +534,121 @@ function sendInputCommand(line) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Controle remoto no Linux (via xdotool, precisa estar instalado; sessão X11/XWayland)
+// Recebe os mesmos eventos (keyCode estilo Windows VK) e traduz para xdotool.
+// ---------------------------------------------------------------------------
+const VK_TO_X11_KEYSYM = {
+  8: 'BackSpace', 9: 'Tab', 13: 'Return', 16: 'Shift_L', 17: 'Control_L', 18: 'Alt_L',
+  19: 'Pause', 20: 'Caps_Lock', 27: 'Escape', 32: 'space', 33: 'Prior', 34: 'Next',
+  35: 'End', 36: 'Home', 37: 'Left', 38: 'Up', 39: 'Right', 40: 'Down', 45: 'Insert',
+  46: 'Delete', 91: 'Super_L', 92: 'Super_R', 106: 'KP_Multiply', 107: 'KP_Add',
+  109: 'KP_Subtract', 110: 'KP_Decimal', 111: 'KP_Divide', 144: 'Num_Lock',
+  145: 'Scroll_Lock', 160: 'Shift_L', 161: 'Shift_R', 162: 'Control_L', 163: 'Control_R',
+  164: 'Alt_L', 165: 'Alt_R', 186: 'semicolon', 187: 'equal', 188: 'comma', 189: 'minus',
+  190: 'period', 191: 'slash', 192: 'grave', 219: 'bracketleft', 220: 'backslash',
+  221: 'bracketright', 222: 'apostrophe'
+};
+
+function vkToX11Keysym(vk) {
+  vk = Number(vk) || 0;
+  if (VK_TO_X11_KEYSYM[vk]) return VK_TO_X11_KEYSYM[vk];
+  if (vk >= 48 && vk <= 57) return String.fromCharCode(vk); // 0-9
+  if (vk >= 65 && vk <= 90) return String.fromCharCode(vk + 32); // a-z
+  if (vk >= 96 && vk <= 105) return `KP_${vk - 96}`;
+  if (vk >= 112 && vk <= 123) return `F${vk - 111}`;
+  return null;
+}
+
+const linuxInputQueue = [];
+let linuxInputRunning = false;
+let linuxXdotoolMissing = false;
+
+function pumpLinuxInputQueue() {
+  if (linuxInputRunning || linuxXdotoolMissing) return;
+  const item = linuxInputQueue.shift();
+  if (!item) return;
+  linuxInputRunning = true;
+
+  let finished = false;
+  const done = () => {
+    if (finished) return;
+    finished = true;
+    linuxInputRunning = false;
+    pumpLinuxInputQueue();
+  };
+
+  try {
+    const child = spawn('xdotool', item.args, { stdio: 'ignore' });
+    child.on('error', (err) => {
+      if (err && err.code === 'ENOENT') {
+        linuxXdotoolMissing = true;
+        linuxInputQueue.length = 0;
+        console.warn('xdotool não encontrado: controle remoto indisponível neste Linux.');
+      }
+      done();
+    });
+    child.on('exit', done);
+  } catch (_) {
+    done();
+  }
+}
+
+function enqueueLinuxInput(args, isMove = false) {
+  if (linuxXdotoolMissing) return;
+  const last = linuxInputQueue[linuxInputQueue.length - 1];
+  // Junta movimentos consecutivos do mouse para não encher a fila
+  if (isMove && last && last.isMove) {
+    last.args = args;
+  } else {
+    linuxInputQueue.push({ args, isMove });
+  }
+  pumpLinuxInputQueue();
+}
+
+function executeRemoteInputEventLinux(evt) {
+  const display = screen.getPrimaryDisplay();
+  const scale = display.scaleFactor || 1;
+  const x = Math.round(Math.max(0, Math.min(1, Number(evt.nx) || 0)) * display.size.width * scale);
+  const y = Math.round(Math.max(0, Math.min(1, Number(evt.ny) || 0)) * display.size.height * scale);
+  // JS: 0 esquerdo, 1 meio, 2 direito -> X11: 1, 2, 3
+  const xButton = String(([1, 2, 3][Number(evt.button) || 0]) || 1);
+
+  switch (evt.action) {
+    case 'mousemove':
+      enqueueLinuxInput(['mousemove', String(x), String(y)], true);
+      break;
+    case 'mousedown':
+      enqueueLinuxInput(['mousemove', String(x), String(y), 'mousedown', xButton]);
+      break;
+    case 'mouseup':
+      enqueueLinuxInput(['mousemove', String(x), String(y), 'mouseup', xButton]);
+      break;
+    case 'wheel':
+      enqueueLinuxInput(['click', (Number(evt.deltaY) || 0) > 0 ? '5' : '4']);
+      break;
+    case 'keydown':
+    case 'keyup': {
+      const keysym = vkToX11Keysym(evt.keyCode);
+      if (keysym) {
+        enqueueLinuxInput([evt.action === 'keydown' ? 'keydown' : 'keyup', keysym]);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 function executeRemoteInputEvent(evt) {
   if (!evt || typeof evt !== 'object') return;
+
+  if (process.platform === 'linux') {
+    executeRemoteInputEventLinux(evt);
+    return;
+  }
+  if (process.platform !== 'win32') return;
+
   const nx = Math.max(0, Math.min(10000, Math.round((Number(evt.nx) || 0) * 10000)));
   const ny = Math.max(0, Math.min(10000, Math.round((Number(evt.ny) || 0) * 10000)));
 
