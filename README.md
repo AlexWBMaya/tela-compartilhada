@@ -90,6 +90,10 @@ npm run build-exe
 - **C# (.NET nativo do Windows) + AudioWorklet:** O arquivo `src/audio-loopback-worker.cs` é compilado automaticamente na primeira execução usando o `csc.exe` que já vem no Windows. Ele captura o áudio PCM apenas do processo do jogo via WASAPI e envia para o WebRTC sem depender de bibliotecas externas.
 - **PowerShell + User32.dll:** Usado em segundo plano para traduzir os eventos de mouse e teclado do controle remoto direto para o sistema operacional sem instalar drivers de terceiros.
 
+## Nota sobre o uso de IA
+
+Este projeto foi desenvolvido com o auxílio de ferramentas de Inteligência Artificial (IA) no planejamento, estruturação do código, arquitetura da solução e resolução de bugs de compatibilidade multiplataforma.
+
 ## Licença
 
 Distribuído sob a licença MIT.
