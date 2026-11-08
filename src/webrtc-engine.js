@@ -357,17 +357,40 @@ export class MultiStreamRoomEngine {
       this.discoveryTimeouts.push(timer);
     }
 
-    // Busca contínua enquanto estiver sozinho na sala ou houver peers conhecidos desconectados
+    // Busca contínua enquanto estiver sozinho na sala ou houver peers desconectados
     this.discoveryInterval = setInterval(() => {
       if (!this.peer || this.peer.destroyed || !this.roomCode) return;
-      if (this.peers.size === 0 || this._hasUnconnectedKnownPeers()) {
+      if (this.peers.size === 0 || this._hasUnconnectedPeers()) {
         this._discoverRoomPeers();
       }
     }, 3500);
   }
 
-  _hasUnconnectedKnownPeers() {
-    if (!this.roomCode) return false;
+  _hasUnconnectedPeers() {
+    if (!this.roomCode || !this.peer || this.peer.destroyed) return false;
+    const slots = this.getRoomSlotIds(this.roomCode);
+    const mySlotIdx = slots.indexOf(this.myPeerId);
+
+    // Se sou membro e não o host (slot 0), devo SEMPRE estar conectado ao host!
+    if (mySlotIdx !== 0 && !this.peers.has(slots[0])) {
+      return true;
+    }
+
+    // Se sou membro, devo estar conectado a todos os slots anteriores ao meu
+    if (mySlotIdx > 0) {
+      for (let i = 0; i < mySlotIdx; i++) {
+        if (!this.peers.has(slots[i])) return true;
+      }
+    }
+
+    // Se sou o host e tenho menos de 3 conexões ativas, sonda slots conhecidos
+    if (mySlotIdx === 0 && this.peers.size < 3) {
+      for (let i = 1; i <= 3; i++) {
+        if (slots[i] && !this.peers.has(slots[i])) return true;
+      }
+    }
+
+    // Peers conhecidos salvos no histórico da sala
     const known = this._getKnownRoomPeers(this.roomCode);
     for (const pid of known) {
       if (pid && pid !== this.myPeerId && !this.peers.has(pid)) {
@@ -398,15 +421,16 @@ export class MultiStreamRoomEngine {
         targets.add(slots[i]);
       }
     } else if (mySlotIdx === 0) {
-      // Se o host estiver sozinho na sala, sonda os primeiros slots (s1, s2)
-      // para o caso de um membro ter entrado mas ter sofrido bloqueio de firewall/NAT unilateral
-      if (this.peers.size === 0) {
+      // Host: se tiver menos de 3 conexões, sonda os primeiros slots (s1, s2, s3)
+      if (this.peers.size < 3) {
         targets.add(slots[1]);
         targets.add(slots[2]);
+        targets.add(slots[3]);
       }
     } else if (mySlotIdx < 0) {
-      // Se for um ID aleatório (membro fallback), tenta sempre o host
+      // Se for um ID aleatório (membro fallback), tenta sempre o host e s1
       targets.add(slots[0]);
+      targets.add(slots[1]);
     }
 
     for (const targetPeerId of targets) {
@@ -431,6 +455,23 @@ export class MultiStreamRoomEngine {
       if (this.peer && !this.peer.destroyed) {
         this.peer.reconnect();
       }
+    });
+
+    peerInstance.on('error', (err) => {
+      console.warn('Aviso no PeerJS:', err?.type || err);
+      if (err?.type === 'peer-unavailable') {
+        const match = /peer\s+(\S+)/i.exec(err.message || '');
+        const targetId = match ? match[1].trim() : null;
+        if (targetId && this.pendingConns.has(targetId)) {
+          const pending = this.pendingConns.get(targetId);
+          this.pendingConns.delete(targetId);
+          pending._ssproReplaced = true;
+          try {
+            pending.close();
+          } catch (_) {}
+        }
+      }
+      this.callbacks.onError?.(err);
     });
   }
 
@@ -682,162 +723,169 @@ export class MultiStreamRoomEngine {
     if (!peerEntry) return;
     peerEntry.lastSeen = Date.now();
 
-    switch (msg.type) {
-      case 'hello': {
-        peerEntry.nickname = msg.nickname || peerEntry.nickname;
-        if (msg.clientId) peerEntry.clientId = msg.clientId;
-        if (msg.sessionId) peerEntry.sessionId = msg.sessionId;
-        peerEntry.sharing = Boolean(msg.sharing);
-        peerEntry.streamMeta = msg.streamMeta || null;
-        this._purgeDuplicatePeers(remotePeerId, peerEntry.clientId);
-        this._saveKnownRoomPeers();
-        if (this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
-          this._callPeerWithScreen(remotePeerId);
+    try {
+      switch (msg.type) {
+        case 'hello': {
+          peerEntry.nickname = msg.nickname || peerEntry.nickname;
+          if (msg.clientId) peerEntry.clientId = msg.clientId;
+          if (msg.sessionId) peerEntry.sessionId = msg.sessionId;
+          peerEntry.sharing = Boolean(msg.sharing);
+          peerEntry.streamMeta = msg.streamMeta || null;
+          this._purgeDuplicatePeers(remotePeerId, peerEntry.clientId);
+          this._saveKnownRoomPeers();
+          if (this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
+            this._callPeerWithScreen(remotePeerId);
+          }
+          if (peerEntry.sharing && !peerEntry.remoteStream) {
+            this._sendToPeer(remotePeerId, { type: 'request-stream' });
+            setTimeout(() => {
+              const current = this.peers.get(remotePeerId);
+              if (current && current.sharing && !current.remoteStream) {
+                this._sendToPeer(remotePeerId, { type: 'request-stream' });
+              }
+            }, 1200);
+          }
+          this._notifyPeersUpdated();
+          break;
         }
-        if (peerEntry.sharing && !peerEntry.remoteStream) {
-          setTimeout(() => {
-            const current = this.peers.get(remotePeerId);
-            if (current && current.sharing && !current.remoteStream) {
-              this._sendToPeer(remotePeerId, { type: 'request-stream' });
-            }
-          }, 1200);
+
+        case 'request-stream': {
+          if (this.isSharing && this.localStream) {
+            this._callPeerWithScreen(remotePeerId);
+          }
+          break;
         }
-        this._notifyPeersUpdated();
-        break;
-      }
 
-      case 'request-stream': {
-        if (this.isSharing && this.localStream) {
-          this._callPeerWithScreen(remotePeerId);
+        case 'ping': {
+          this._sendToPeer(remotePeerId, {
+            type: 'pong',
+            ts: msg.ts
+          });
+          break;
         }
-        break;
-      }
 
-      case 'ping': {
-        this._sendToPeer(remotePeerId, {
-          type: 'pong',
-          ts: msg.ts
-        });
-        break;
-      }
-
-      case 'pong': {
-        break;
-      }
-
-      case 'peer-leaving': {
-        this._handlePeerDisconnected(remotePeerId);
-        if (msg.clientId) {
-          this._purgeDuplicatePeers(null, msg.clientId);
+        case 'pong': {
+          break;
         }
-        break;
-      }
 
-      case 'room-roster': {
-        if (Array.isArray(msg.peers)) {
-          for (const item of msg.peers) {
-            if (item.peerId && item.peerId !== this.myPeerId && !this.peers.has(item.peerId)) {
-              // Tie-breaker para evitar discagem simultânea entre membros comuns:
-              // Conecta apenas se o meu peerId for maior
-              if (this.myPeerId > item.peerId) {
-                this._connectToPeer(item.peerId);
+        case 'peer-leaving': {
+          this._handlePeerDisconnected(remotePeerId);
+          if (msg.clientId) {
+            this._purgeDuplicatePeers(null, msg.clientId);
+          }
+          break;
+        }
+
+        case 'room-roster': {
+          if (Array.isArray(msg.peers)) {
+            const coordinatorId = this.getCoordinatorId(this.roomCode);
+            for (const item of msg.peers) {
+              if (item.peerId && item.peerId !== this.myPeerId && !this.peers.has(item.peerId)) {
+                // Conecta sempre ao host da sala, ou aplica tie-breaker entre membros comuns
+                if (item.peerId === coordinatorId || this.myPeerId > item.peerId) {
+                  this._connectToPeer(item.peerId);
+                }
               }
             }
+            this._saveKnownRoomPeers();
           }
-          this._saveKnownRoomPeers();
+          break;
         }
-        break;
-      }
 
-      case 'stream-state': {
-        peerEntry.sharing = Boolean(msg.sharing);
-        peerEntry.streamMeta = msg.streamMeta || null;
-        if (!peerEntry.sharing) {
-          peerEntry.remoteStream = null;
-          const inc = this.incomingCalls.get(remotePeerId);
-          if (inc) {
-            inc._ssproReplaced = true;
-            try { inc.close(); } catch (_) {}
-            this.incomingCalls.delete(remotePeerId);
-          }
-          this.callbacks.onRemoteStreamRemoved?.(remotePeerId);
-        } else if (!peerEntry.remoteStream) {
-          setTimeout(() => {
-            const current = this.peers.get(remotePeerId);
-            if (current && current.sharing && !current.remoteStream) {
-              this._sendToPeer(remotePeerId, { type: 'request-stream' });
+        case 'stream-state': {
+          peerEntry.sharing = Boolean(msg.sharing);
+          peerEntry.streamMeta = msg.streamMeta || null;
+          if (!peerEntry.sharing) {
+            peerEntry.remoteStream = null;
+            const inc = this.incomingCalls.get(remotePeerId);
+            if (inc) {
+              inc._ssproReplaced = true;
+              try { inc.close(); } catch (_) {}
+              this.incomingCalls.delete(remotePeerId);
             }
-          }, 1200);
+            this.callbacks.onRemoteStreamRemoved?.(remotePeerId);
+          } else if (!peerEntry.remoteStream) {
+            this._sendToPeer(remotePeerId, { type: 'request-stream' });
+            setTimeout(() => {
+              const current = this.peers.get(remotePeerId);
+              if (current && current.sharing && !current.remoteStream) {
+                this._sendToPeer(remotePeerId, { type: 'request-stream' });
+              }
+            }, 1200);
+          }
+          this._notifyPeersUpdated();
+          break;
         }
-        this._notifyPeersUpdated();
-        break;
-      }
 
-      case 'viewer-visibility': {
-        peerEntry.viewerVisibility = Boolean(msg.visible);
-        peerEntry.viewerTier = msg.tier || 'high';
-        if (peerEntry.viewerVisibility && this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
-          this._callPeerWithScreen(remotePeerId);
-        } else {
-          this._applyEncodingForPeer(remotePeerId);
+        case 'viewer-visibility': {
+          peerEntry.viewerVisibility = Boolean(msg.visible);
+          peerEntry.viewerTier = msg.tier || 'high';
+          if (peerEntry.viewerVisibility && this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
+            this._callPeerWithScreen(remotePeerId);
+          } else {
+            this._applyEncodingForPeer(remotePeerId);
+          }
+          this._notifyPeersUpdated();
+          break;
         }
-        this._notifyPeersUpdated();
-        break;
-      }
 
-      case 'control-request': {
-        if (this.isSharing) {
-          this.callbacks.onControlRequest?.({
+        case 'control-request': {
+          if (this.isSharing) {
+            this.callbacks.onControlRequest?.({
+              peerId: remotePeerId,
+              nickname: peerEntry.nickname
+            });
+          } else {
+            this._sendToPeer(remotePeerId, {
+              type: 'control-response',
+              granted: false
+            });
+          }
+          break;
+        }
+
+        case 'control-response': {
+          this.callbacks.onControlResponse?.({
+            peerId: remotePeerId,
+            nickname: peerEntry.nickname,
+            granted: Boolean(msg.granted)
+          });
+          break;
+        }
+
+        case 'control-revoke': {
+          this.callbacks.onControlRevoked?.({
             peerId: remotePeerId,
             nickname: peerEntry.nickname
           });
-        } else {
-          this._sendToPeer(remotePeerId, {
-            type: 'control-response',
-            granted: false
-          });
+          break;
         }
-        break;
-      }
 
-      case 'control-response': {
-        this.callbacks.onControlResponse?.({
-          peerId: remotePeerId,
-          nickname: peerEntry.nickname,
-          granted: Boolean(msg.granted)
-        });
-        break;
-      }
-
-      case 'control-revoke': {
-        this.callbacks.onControlRevoked?.({
-          peerId: remotePeerId,
-          nickname: peerEntry.nickname
-        });
-        break;
-      }
-
-      case 'control-stop': {
-        if (this.allowedControllerPeerId === remotePeerId) {
-          this.allowedControllerPeerId = null;
-          this.callbacks.onControllerStopped?.({ peerId: remotePeerId });
+        case 'control-stop': {
+          if (this.allowedControllerPeerId === remotePeerId) {
+            this.allowedControllerPeerId = null;
+            this.callbacks.onControllerStopped?.({ peerId: remotePeerId });
+          }
+          break;
         }
-        break;
-      }
 
-      case 'remote-input': {
-        if (this.isSharing && this.allowedControllerPeerId === remotePeerId && msg.evt) {
-          window.electronAPI?.executeRemoteInput(msg.evt);
+        case 'remote-input': {
+          if (this.isSharing && this.allowedControllerPeerId === remotePeerId && msg.evt) {
+            window.electronAPI?.executeRemoteInput(msg.evt);
+          }
+          break;
         }
-        break;
-      }
 
-      default:
-        break;
+        default:
+          break;
+      }
+    } catch (err) {
+      console.warn('Erro ao processar mensagem P2P do peer:', remotePeerId, err);
     }
   }
 
   _handleIncomingCall(mediaConn) {
+    if (!mediaConn) return;
     const remotePeerId = mediaConn.peer;
     const existingCall = this.incomingCalls.get(remotePeerId);
     if (existingCall && existingCall !== mediaConn) {
@@ -846,8 +894,18 @@ export class MultiStreamRoomEngine {
     }
 
     this.incomingCalls.set(remotePeerId, mediaConn);
-    // Responde sem enviar mídia de volta (cada transmissão é unidirecional por chamada para máxima performance)
-    mediaConn.answer();
+
+    try {
+      // Responde sem enviar mídia de volta (cada transmissão é unidirecional por chamada para máxima performance)
+      mediaConn.answer();
+    } catch (err) {
+      console.warn('Falha ao responder chamada de mídia:', err);
+      return;
+    }
+
+    mediaConn.on('error', (err) => {
+      console.warn('Aviso na chamada incoming de', remotePeerId, err);
+    });
 
     mediaConn.on('stream', (remoteStream) => {
       const incClientId = mediaConn.metadata?.clientId || null;
@@ -1310,6 +1368,23 @@ export class MultiStreamRoomEngine {
         videoTrack.contentHint = contentHint || 'motion';
       } catch (_) {}
 
+      videoTrack.enabled = true;
+
+      // No Linux/PipeWire a track pode iniciar em estado muted até o portal entregar o primeiro frame
+      if (videoTrack.muted) {
+        console.log('PipeWire track iniciou muted; aguardando primeiro frame...');
+        videoTrack.addEventListener(
+          'unmute',
+          () => {
+            console.log('PipeWire track unmuted!');
+            for (const remotePeerId of this.outgoingCalls.keys()) {
+              this._applyEncodingForPeer(remotePeerId);
+            }
+          },
+          { once: true }
+        );
+      }
+
       videoTrack.onended = () => {
         this.stopScreenShare();
       };
@@ -1423,42 +1498,65 @@ export class MultiStreamRoomEngine {
   }
 
   _callPeerWithScreen(remotePeerId) {
-    if (!this.peer || !this.localStream || !this.isSharing) return;
+    if (!this.peer || this.peer.destroyed || !this.localStream || !this.isSharing) return;
 
     const existingCall = this.outgoingCalls.get(remotePeerId);
     if (existingCall) {
+      existingCall._ssproReplaced = true;
       try { existingCall.close(); } catch (_) {}
       this.outgoingCalls.delete(remotePeerId);
     }
 
-    const call = this.peer.call(remotePeerId, this.localStream, {
-      metadata: {
-        nickname: this.myNickname,
-        clientId: this.clientId,
-        sessionId: this.sessionId,
-        streamMeta: this._buildMyStreamMeta()
-      }
-    });
+    let call = null;
+    try {
+      call = this.peer.call(remotePeerId, this.localStream, {
+        metadata: {
+          nickname: this.myNickname,
+          clientId: this.clientId,
+          sessionId: this.sessionId,
+          streamMeta: this._buildMyStreamMeta()
+        }
+      });
+    } catch (err) {
+      console.warn('Falha ao iniciar chamada de tela para', remotePeerId, err);
+      return;
+    }
 
     if (!call) return;
     this.outgoingCalls.set(remotePeerId, call);
 
-    const applyParams = () => {
-      this._applyCodecPreference(call.peerConnection, this.qualityConfig.codec || 'VP9');
-      this._applyEncodingForPeer(remotePeerId);
-    };
+    call.on('error', (err) => {
+      console.warn('Aviso na chamada outgoing para', remotePeerId, err);
+      if (this.outgoingCalls.get(remotePeerId) === call) {
+        this.outgoingCalls.delete(remotePeerId);
+      }
+    });
 
-    if (call.peerConnection) {
-      applyParams();
-      call.peerConnection.addEventListener('connectionstatechange', () => {
-        if (call.peerConnection.connectionState === 'connected') {
+    call.on('close', () => {
+      if (this.outgoingCalls.get(remotePeerId) === call) {
+        this.outgoingCalls.delete(remotePeerId);
+      }
+    });
+
+    const pc = call.peerConnection;
+    if (pc) {
+      this._applyCodecPreference(pc, this.qualityConfig.codec || 'VP9');
+
+      pc.addEventListener('signalingstatechange', () => {
+        if (pc.signalingState === 'stable') {
+          this._applyEncodingForPeer(remotePeerId);
+        }
+      });
+
+      pc.addEventListener('connectionstatechange', () => {
+        if (pc.connectionState === 'connected') {
           this._applyEncodingForPeer(remotePeerId);
         }
       });
     }
 
-    setTimeout(() => this._applyEncodingForPeer(remotePeerId), 600);
-    setTimeout(() => this._applyEncodingForPeer(remotePeerId), 2000);
+    setTimeout(() => this._applyEncodingForPeer(remotePeerId), 800);
+    setTimeout(() => this._applyEncodingForPeer(remotePeerId), 2500);
   }
 
   _applyCodecPreference(pc, preferredCodec = 'VP9') {
@@ -1485,7 +1583,9 @@ export class MultiStreamRoomEngine {
             transceiver.sender?.track?.kind === 'video' &&
             typeof transceiver.setCodecPreferences === 'function'
           ) {
-            transceiver.setCodecPreferences([...preferred, ...rest]);
+            try {
+              transceiver.setCodecPreferences([...preferred, ...rest]);
+            } catch (_) {}
           }
         }
       }
@@ -1498,6 +1598,7 @@ export class MultiStreamRoomEngine {
     const call = this.outgoingCalls.get(remotePeerId);
     const pc = call?.peerConnection;
     if (!pc) return;
+    if (pc.signalingState !== 'stable') return;
 
     const peerEntry = this.peers.get(remotePeerId);
     // IMPORTANTE: isVisibleOnViewer inicia como TRUE para que streams novas nunca fiquem
@@ -1538,7 +1639,7 @@ export class MultiStreamRoomEngine {
 
           await sender.setParameters(params);
         } catch (err) {
-          console.warn('Aviso ao configurar parâmetros de vídeo WebRTC:', err);
+          console.warn('Aviso ao configurar parâmetros de vídeo WebRTC:', err?.message || err);
         }
       } else if (sender.track.kind === 'audio') {
         try {
@@ -1546,7 +1647,6 @@ export class MultiStreamRoomEngine {
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          // Áudio do jogo com bitrate alto (192 kbps estéreo limpo)
           params.encodings[0].maxBitrate = 192_000;
           params.encodings[0].priority = 'high';
           await sender.setParameters(params);

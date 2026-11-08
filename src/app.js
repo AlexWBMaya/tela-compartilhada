@@ -191,10 +191,21 @@ const engine = new MultiStreamRoomEngine({
       muted: existing?.muted ?? uiState.allMuted
     });
 
-    if (uiState.layoutMode === 'single' && uiState.spotlightStreamId && uiState.spotlightStreamId !== peerId) {
-      uiState.minimizedStreams.add(peerId);
-    } else if (!uiState.spotlightStreamId || uiState.spotlightStreamId === 'local') {
-      uiState.spotlightStreamId = peerId;
+    if (uiState.layoutMode === 'single') {
+      if (!uiState.spotlightStreamId || uiState.spotlightStreamId === 'local') {
+        // Se eu estava vendo apenas a minha própria prévia local, dá preferência à tela do amigo!
+        uiState.spotlightStreamId = peerId;
+        uiState.minimizedStreams.delete(peerId);
+        if (uiState.activeStreams.has('local')) {
+          uiState.minimizedStreams.add('local');
+        }
+      } else if (uiState.spotlightStreamId !== peerId) {
+        uiState.minimizedStreams.add(peerId);
+      }
+    } else {
+      if (!uiState.spotlightStreamId || uiState.spotlightStreamId === 'local') {
+        uiState.spotlightStreamId = peerId;
+      }
     }
 
     updateRoomStatusUI(uiState.peersList);
@@ -315,27 +326,14 @@ function isWatchingStream(streamId) {
 
 function openSpecificStream(streamId, exclusiveSingle = false) {
   uiState.minimizedStreams.delete(streamId);
+  uiState.spotlightStreamId = streamId;
 
-  if (exclusiveSingle) {
+  if (exclusiveSingle || uiState.layoutMode === 'single') {
     uiState.layoutMode = 'single';
-    uiState.spotlightStreamId = streamId;
     for (const id of uiState.activeStreams.keys()) {
       if (id !== streamId) {
         uiState.minimizedStreams.add(id);
       }
-    }
-  } else {
-    // Se estava no modo "Só 1 Tela" e o usuário clicou em "Assistir" em uma segunda pessoa na lista lateral,
-    // muda automaticamente para Grade para deixar as duas (ou mais) escolhidas abertas!
-    const currentlyOpenCount = Array.from(uiState.activeStreams.keys()).filter(
-      (id) => !uiState.minimizedStreams.has(id)
-    ).length;
-
-    if (uiState.layoutMode === 'single' && currentlyOpenCount > 1) {
-      uiState.layoutMode = 'grid';
-    }
-    if (!uiState.spotlightStreamId) {
-      uiState.spotlightStreamId = streamId;
     }
   }
 
@@ -452,6 +450,13 @@ function syncStreamsStage() {
   for (const child of Array.from(el.streamsContainer.children)) {
     const sid = child.dataset.streamId;
     if (!uiState.activeStreams.has(sid) || uiState.minimizedStreams.has(sid)) {
+      const v = child.querySelector('.stream-video');
+      if (v) {
+        try {
+          v.pause();
+          v.srcObject = null;
+        } catch (_) {}
+      }
       child.remove();
     }
   }
@@ -566,6 +571,16 @@ function createStreamCardElement(info) {
   `;
 
   const videoEl = card.querySelector('.stream-video');
+  videoEl.playsInline = true;
+  videoEl.autoplay = true;
+
+  videoEl.addEventListener('loadedmetadata', () => {
+    videoEl.play().catch(() => {});
+  });
+  videoEl.addEventListener('canplay', () => {
+    videoEl.play().catch(() => {});
+  });
+
   const muteBtn = card.querySelector('.btn-mute-toggle');
   const volumeSlider = card.querySelector('.stream-volume-slider');
   const remoteCtrlBtn = card.querySelector('.btn-remote-control');
@@ -818,7 +833,10 @@ function updateStreamCardElement(card, info) {
     videoEl.hidden = false;
     if (videoEl.srcObject !== info.stream) {
       videoEl.srcObject = info.stream;
-      videoEl.play().catch(() => {});
+    }
+    const playPromise = videoEl.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(() => {});
     }
   }
 

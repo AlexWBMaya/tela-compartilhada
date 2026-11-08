@@ -29,24 +29,31 @@ if (underWine) {
   // Desativar a GPU força a decodificação por software (CPU/VP9), que funciona perfeitamente!
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-gpu-compositing');
+} else if (process.platform === 'linux') {
+  // No Linux nativo (CachyOS, Arch, Ubuntu, Fedora, Debian):
+  // 1. Suporte Wayland com fallback automático para X11
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+  // 2. Captura de tela nativa via PipeWire / Portal XDG
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer,VaapiVideoDecoder');
+  // 3. DESATIVA VaapiVideoEncoder no Linux: encoders VA-API no Chromium causam crash do processo GPU (exit_code=5)
+  //    e produzem tela preta (0.0 Mbps) no WebRTC, especialmente em placas NVIDIA e certos drivers Mesa.
+  //    O software encoder (libvpx/openh264) com multi-threading AVX2 é ultra estável e atinge 60 FPS com folga.
+  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns,VaapiVideoEncoder,PlatformHEVCEncoderSupport');
+  app.commandLine.appendSwitch('enable-gpu-rasterization');
 } else {
+  // Windows nativo: DXVA/D3D11 aceleração máxima por hardware
   app.commandLine.appendSwitch('enable-gpu-rasterization');
   app.commandLine.appendSwitch('enable-zero-copy');
   app.commandLine.appendSwitch('ignore-gpu-blocklist');
   app.commandLine.appendSwitch('enable-accelerated-video-decode');
   app.commandLine.appendSwitch('enable-accelerated-video-encode');
+  app.commandLine.appendSwitch('enable-features', 'PlatformHEVCEncoderSupport');
+  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
 }
 
-app.commandLine.appendSwitch('enable-features', 'VaapiVideoDecoder,VaapiVideoEncoder,PlatformHEVCEncoderSupport,WebRTCPipeWireCapturer');
-app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
-
-if (process.platform === 'linux') {
-  // Usa Wayland nativo quando disponível (necessário para captura de tela via PipeWire)
-  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
-}
 
 let mainWindow = null;
 let overlayState = {
@@ -122,6 +129,13 @@ function createMainWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.error('Render process gone:', details);
+    if (details.reason !== 'clean-exit' && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.reload();
+    }
+  });
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -1070,6 +1084,10 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
     }
+  });
+
+  app.on('child-process-gone', (event, details) => {
+    console.warn('Processo filho Electron finalizado:', details);
   });
 });
 
