@@ -121,6 +121,7 @@ export class MultiStreamRoomEngine {
     this.activeAudioStatus = null;
 
     this.statsInterval = null;
+    this.discoveryInterval = null;
     this.discoveryTimeouts = [];
     this.telemetryTickCount = 0;
     this.previousStats = new Map();
@@ -141,9 +142,15 @@ export class MultiStreamRoomEngine {
 
   normalizeRoomCode(code) {
     return String(code || '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
       .trim()
       .toUpperCase()
+      .replace(/[\s_]+/g, '-')
       .replace(/[^A-Z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
       .slice(0, 24);
   }
 
@@ -168,28 +175,7 @@ export class MultiStreamRoomEngine {
   }
 
   _getOrderedCandidateSlots(roomCode) {
-    const clean = this.normalizeRoomCode(roomCode).toLowerCase();
-    const slots = this.getRoomSlotIds(roomCode);
-    try {
-      const raw = localStorage.getItem(`sspro_last_slot_${clean}`);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (
-          parsed &&
-          typeof parsed.slotIndex === 'number' &&
-          parsed.slotIndex >= 0 &&
-          parsed.slotIndex < slots.length &&
-          Date.now() - (parsed.ts || 0) < 45000
-        ) {
-          const rotated = [];
-          for (let i = 1; i <= slots.length; i++) {
-            rotated.push(slots[(parsed.slotIndex + i) % slots.length]);
-          }
-          return rotated;
-        }
-      }
-    } catch (_) {}
-    return slots;
+    return this.getRoomSlotIds(roomCode);
   }
 
   _saveMySlotIndex(roomCode, peerId) {
@@ -313,6 +299,10 @@ export class MultiStreamRoomEngine {
           slotIdx < candidateSlots.length ? candidateSlots[slotIdx] : this.generateMemberId(code);
 
         const peerCandidate = new window.Peer(candidateId, {
+          host: '0.peerjs.com',
+          port: 443,
+          path: '/',
+          secure: true,
           config: {
             iceServers: ICE_SERVERS,
             sdpSemantics: 'unified-plan'
@@ -350,10 +340,15 @@ export class MultiStreamRoomEngine {
       for (const t of this.discoveryTimeouts) clearTimeout(t);
     }
     this.discoveryTimeouts = [];
+    if (this.discoveryInterval) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = null;
+    }
 
     this._discoverRoomPeers();
 
-    for (const delayMs of [1000, 2600, 5200]) {
+    // Rajadas rápidas nos primeiros segundos para conexão instantânea
+    for (const delayMs of [600, 1500, 3000]) {
       const timer = setTimeout(() => {
         if (this.peer && !this.peer.destroyed && this.roomCode) {
           this._discoverRoomPeers();
@@ -361,6 +356,25 @@ export class MultiStreamRoomEngine {
       }, delayMs);
       this.discoveryTimeouts.push(timer);
     }
+
+    // Busca contínua enquanto estiver sozinho na sala ou houver peers conhecidos desconectados
+    this.discoveryInterval = setInterval(() => {
+      if (!this.peer || this.peer.destroyed || !this.roomCode) return;
+      if (this.peers.size === 0 || this._hasUnconnectedKnownPeers()) {
+        this._discoverRoomPeers();
+      }
+    }, 3500);
+  }
+
+  _hasUnconnectedKnownPeers() {
+    if (!this.roomCode) return false;
+    const known = this._getKnownRoomPeers(this.roomCode);
+    for (const pid of known) {
+      if (pid && pid !== this.myPeerId && !this.peers.has(pid)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   _discoverRoomPeers() {
@@ -377,12 +391,18 @@ export class MultiStreamRoomEngine {
       if (pid && pid !== this.myPeerId) targets.add(pid);
     }
 
-    // 2. Regra determinística anti-colisão (evita discagem cruzada simultânea):
-    // Membros com slot > 0 conectam aos slots menores (< mySlotIdx), incluindo sempre o host (slot 0).
-    // O host (slot 0) não precisa discar para slots vazios no escuro: ele apenas aguarda conexões dos membros.
+    // 2. Regra determinística anti-colisão com recuperação de sala:
     if (mySlotIdx > 0) {
+      // Membros conectam aos slots menores (< mySlotIdx), incluindo sempre o host (slot 0)
       for (let i = 0; i < mySlotIdx; i++) {
         targets.add(slots[i]);
+      }
+    } else if (mySlotIdx === 0) {
+      // Se o host estiver sozinho na sala, sonda os primeiros slots (s1, s2)
+      // para o caso de um membro ter entrado mas ter sofrido bloqueio de firewall/NAT unilateral
+      if (this.peers.size === 0) {
+        targets.add(slots[1]);
+        targets.add(slots[2]);
       }
     } else if (mySlotIdx < 0) {
       // Se for um ID aleatório (membro fallback), tenta sempre o host
@@ -421,8 +441,8 @@ export class MultiStreamRoomEngine {
 
     const pending = this.pendingConns.get(remotePeerId);
     if (pending) {
-      // Se a conexão já abriu ou foi iniciada há menos de 15 segundos, deixa concluir sem abortar
-      if (pending.open || Date.now() - (pending._ssproCreatedAt || 0) < 15000) {
+      // Se a conexão já abriu ou foi iniciada há menos de 5 segundos, deixa concluir sem abortar
+      if (pending.open || Date.now() - (pending._ssproCreatedAt || 0) < 5000) {
         return;
       }
       this.pendingConns.delete(remotePeerId);
@@ -521,7 +541,7 @@ export class MultiStreamRoomEngine {
           conn.close();
         } catch (_) {}
       }
-    }, 15000);
+    }, 5000);
 
     conn.on('open', () => {
       clearTimeout(pendingTimeout);
@@ -929,6 +949,11 @@ export class MultiStreamRoomEngine {
     this.previousStats.delete(remotePeerId);
     this.callbacks.onRemoteStreamRemoved?.(remotePeerId);
     this._notifyPeersUpdated();
+
+    // Se ficou sozinho na sala, retoma busca contínua imediata para reencontrar amigos
+    if (this.peers.size === 0 && this.roomCode) {
+      this._scheduleRoomDiscovery();
+    }
   }
 
   _sendToPeer(remotePeerId, payload) {
@@ -1675,6 +1700,10 @@ export class MultiStreamRoomEngine {
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
       this.statsInterval = null;
+    }
+    if (this.discoveryInterval) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = null;
     }
     if (this.discoveryTimeouts) {
       for (const t of this.discoveryTimeouts) clearTimeout(t);

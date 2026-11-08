@@ -1176,7 +1176,7 @@ function applyOverlayStateToDOM(state) {
 
 function initEvents() {
   const savedName = localStorage.getItem('sspro_nickname') || '';
-  const savedRoom = localStorage.getItem('sspro_room_code') || '';
+  const savedRoom = engine.normalizeRoomCode(localStorage.getItem('sspro_room_code') || '');
   if (savedName) el.nicknameInput.value = savedName;
   if (savedRoom) {
     el.roomCodeInput.value = savedRoom;
@@ -1191,9 +1191,13 @@ function initEvents() {
   el.joinRoomForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const nickname = el.nicknameInput.value.trim() || 'Jogador';
-    const roomCode = el.roomCodeInput.value.trim().toUpperCase();
-    if (!roomCode) return;
+    const roomCode = engine.normalizeRoomCode(el.roomCodeInput.value);
+    if (!roomCode) {
+      alert('Digite um código de sala válido.');
+      return;
+    }
 
+    el.roomCodeInput.value = roomCode;
     localStorage.setItem('sspro_nickname', nickname);
     localStorage.setItem('sspro_room_code', roomCode);
 
