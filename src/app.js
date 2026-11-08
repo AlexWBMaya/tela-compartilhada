@@ -991,25 +991,7 @@ function renderQualityPresets() {
   }
 }
 
-const isLinuxPlatform = Boolean(
-  window.electronAPI?.platform === 'linux' ||
-  (typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent))
-);
-
 async function loadDesktopSources() {
-  if (isLinuxPlatform) {
-    el.sourcesGrid.innerHTML = `
-      <div class="linux-portal-notice" style="padding: 16px; background: rgba(0, 150, 255, 0.1); border: 1px solid rgba(0, 150, 255, 0.3); border-radius: 8px; font-size: 13px; line-height: 1.5; color: #d0e8ff;">
-        <strong>Linux (Wayland & PipeWire):</strong>
-        <p style="margin: 6px 0 0;">Ao clicar em <b>Transmitir</b>, a janela nativa do seu sistema (KDE/GNOME/XDG Portal) abrirá para você escolher a tela inteira ou janela e conceder permissão de captura.</p>
-      </div>
-    `;
-    uiState.selectedSourceId = null;
-    uiState.selectedSourceName = 'Tela do Sistema (Portal)';
-    syncAudioTargetPickerUI();
-    return;
-  }
-
   el.sourcesGrid.innerHTML = '<p class="field-hint">Procurando telas e janelas...</p>';
   try {
     const sources = await window.electronAPI.getDesktopSources();

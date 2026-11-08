@@ -96,41 +96,37 @@ function createMainWindow() {
     }
   });
 
-  // No Windows: intercepta para permitir escolha de janela específica no modal e áudio de processo/loopback
-  // No Linux: NÃO intercepta, permitindo que o Chromium acione nativamente o diálogo do sistema (XDG Desktop Portal / PipeWire),
-  // onde o usuário seleciona a tela ou janela com permissão segura do compositor, evitando tela preta no Wayland.
-  if (process.platform === 'win32') {
-    session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
-      try {
-        const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-        let chosenSource = null;
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+      let chosenSource = null;
 
-        if (pendingCaptureConfig.sourceId) {
-          chosenSource = sources.find((s) => s.id === pendingCaptureConfig.sourceId);
-        }
-        if (!chosenSource && sources.length > 0) {
-          chosenSource = sources[0];
-        }
-
-        if (!chosenSource) {
-          callback({});
-          return;
-        }
-
-        const response = { video: chosenSource };
-        if (
-          pendingCaptureConfig.includeSystemAudio &&
-          pendingCaptureConfig.useFallbackSystemLoopback
-        ) {
-          response.audio = 'loopback';
-        }
-        callback(response);
-      } catch (err) {
-        console.error('Erro no setDisplayMediaRequestHandler:', err);
-        callback({});
+      if (pendingCaptureConfig.sourceId) {
+        chosenSource = sources.find((s) => s.id === pendingCaptureConfig.sourceId);
       }
-    });
-  }
+      if (!chosenSource && sources.length > 0) {
+        chosenSource = sources[0];
+      }
+
+      if (!chosenSource) {
+        callback({});
+        return;
+      }
+
+      const response = { video: chosenSource };
+      if (
+        process.platform === 'win32' &&
+        pendingCaptureConfig.includeSystemAudio &&
+        pendingCaptureConfig.useFallbackSystemLoopback
+      ) {
+        response.audio = 'loopback';
+      }
+      callback(response);
+    } catch (err) {
+      console.error('Erro no setDisplayMediaRequestHandler:', err);
+      callback({});
+    }
+  });
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 

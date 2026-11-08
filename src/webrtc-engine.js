@@ -1277,11 +1277,7 @@ export class MultiStreamRoomEngine {
 
     let newStream = null;
 
-    const isLinux =
-      (typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent)) ||
-      (window.electronAPI?.platform === 'linux');
-
-    // 1ª tentativa: getDisplayMedia nativo (WGC no Windows / PipeWire nativo no Linux)
+    // 1ª tentativa: getDisplayMedia nativo (WGC no Windows / PipeWire no Linux)
     try {
       newStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -1289,10 +1285,10 @@ export class MultiStreamRoomEngine {
           height: { ideal: height, max: height },
           frameRate: { ideal: fps, max: fps }
         },
-        audio: isLinux ? false : useFallbackSystemLoopback
+        audio: useFallbackSystemLoopback
       });
     } catch (err) {
-      console.warn('getDisplayMedia inicial falhou, tentando novamente apenas com vídeo:', err);
+      console.warn('getDisplayMedia com áudio falhou, tentando apenas com vídeo:', err);
       try {
         newStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
@@ -1303,13 +1299,12 @@ export class MultiStreamRoomEngine {
           audio: false
         });
       } catch (retryErr) {
-        console.warn('getDisplayMedia apenas com vídeo também falhou:', retryErr);
+        console.warn('getDisplayMedia apenas com vídeo também falhou, tentando fallback getUserMedia:', retryErr);
       }
     }
 
-    // 2ª tentativa (Apenas no Windows: fallback por sourceId via desktopCapturer)
-    // No Linux NUNCA usar chromeMediaSource desktop porque ele invoca XGetImage (X11) e gera tela preta no Wayland!
-    if (!newStream && sourceId && !isLinux) {
+    // 2ª tentativa: Fallback direto por sourceId via desktopCapturer
+    if (!newStream && sourceId) {
       const videoConstraints = {
         mandatory: {
           chromeMediaSource: 'desktop',
@@ -1321,25 +1316,13 @@ export class MultiStreamRoomEngine {
         }
       };
 
-      const audioConstraints = useFallbackSystemLoopback
-        ? {
-            mandatory: {
-              chromeMediaSource: 'desktop',
-              chromeMediaSourceId: sourceId
-            }
-          }
-        : false;
-
       try {
-        newStream = await navigator.mediaDevices.getUserMedia({
-          video: videoConstraints,
-          audio: audioConstraints
-        });
-      } catch (audioErr) {
         newStream = await navigator.mediaDevices.getUserMedia({
           video: videoConstraints,
           audio: false
         });
+      } catch (audioErr) {
+        console.warn('Fallback getUserMedia falhou:', audioErr);
       }
     }
 
@@ -1623,21 +1606,20 @@ export class MultiStreamRoomEngine {
             this.qualityConfig.degradationPreference || 'maintain-framerate';
 
           const encoding = params.encodings[0];
-          // Mantém ativo a menos que o peer explicitamente minimize
-          encoding.active = isVisibleOnViewer;
+          // Mantém o encoder WebRTC sempre ativo para evitar congelamento em 0.0 Mbps / tela preta
+          encoding.active = true;
 
-          if (isVisibleOnViewer) {
-            const isThumbnailScale = this.smartScalingEnabled && viewerTier === 'thumbnail';
-            const targetBitrateMbps = isThumbnailScale
-              ? Math.max(2.5, Math.round(this.qualityConfig.bitrateMbps * 0.45))
-              : this.qualityConfig.bitrateMbps;
+          const isThumbnailScale = this.smartScalingEnabled && (viewerTier === 'thumbnail' || !isVisibleOnViewer);
+          const targetBitrateMbps = !isVisibleOnViewer
+            ? 1.0 // Modo standby de baixo consumo quando minimizado
+            : isThumbnailScale
+            ? Math.max(2.5, Math.round(this.qualityConfig.bitrateMbps * 0.45))
+            : this.qualityConfig.bitrateMbps;
 
-            encoding.maxBitrate = Math.round(targetBitrateMbps * 1_000_000);
-            encoding.maxFramerate = this.qualityConfig.fps;
-            encoding.scaleResolutionDownBy = isThumbnailScale ? 1.5 : 1.0;
-            encoding.priority = 'high';
-            encoding.networkPriority = 'high';
-          }
+          encoding.maxBitrate = Math.round(targetBitrateMbps * 1_000_000);
+          encoding.maxFramerate = !isVisibleOnViewer ? 15 : this.qualityConfig.fps;
+          encoding.scaleResolutionDownBy = isThumbnailScale ? 1.5 : 1.0;
+          encoding.priority = 'high';
 
           await sender.setParameters(params);
         } catch (err) {
