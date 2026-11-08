@@ -34,11 +34,12 @@ if (underWine) {
   // 1. Suporte Wayland com fallback automático para X11
   app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
   // 2. Captura de tela nativa via PipeWire / Portal XDG
-  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer,VaapiVideoDecoder');
-  // 3. DESATIVA VaapiVideoEncoder no Linux: encoders VA-API no Chromium causam crash do processo GPU (exit_code=5)
-  //    e produzem tela preta (0.0 Mbps) no WebRTC, especialmente em placas NVIDIA e certos drivers Mesa.
-  //    O software encoder (libvpx/openh264) com multi-threading AVX2 é ultra estável e atinge 60 FPS com folga.
-  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns,VaapiVideoEncoder,PlatformHEVCEncoderSupport');
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
+  // 3. DESATIVA VaapiVideoEncoder e VaapiVideoDecoder no Linux:
+  //    No Linux (especialmente em placas NVIDIA e certos drivers Mesa no CachyOS/Arch), o VA-API
+  //    causa tela preta tanto na decodificação de vídeo recebido quanto na codificação de envio.
+  //    O software decoding/encoding (libvpx/ffmpeg/dav1d) com multi-threading AVX2 é ultra leve e 100% estável.
+  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns,VaapiVideoEncoder,VaapiVideoDecoder,PlatformHEVCEncoderSupport');
   app.commandLine.appendSwitch('enable-gpu-rasterization');
 } else {
   // Windows nativo: DXVA/D3D11 aceleração máxima por hardware
@@ -95,38 +96,41 @@ function createMainWindow() {
     }
   });
 
-  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
-    try {
-      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-      let chosenSource = null;
+  // No Windows: intercepta para permitir escolha de janela específica no modal e áudio de processo/loopback
+  // No Linux: NÃO intercepta, permitindo que o Chromium acione nativamente o diálogo do sistema (XDG Desktop Portal / PipeWire),
+  // onde o usuário seleciona a tela ou janela com permissão segura do compositor, evitando tela preta no Wayland.
+  if (process.platform === 'win32') {
+    session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+        let chosenSource = null;
 
-      if (pendingCaptureConfig.sourceId) {
-        chosenSource = sources.find((s) => s.id === pendingCaptureConfig.sourceId);
-      }
-      if (!chosenSource && sources.length > 0) {
-        chosenSource = sources[0];
-      }
+        if (pendingCaptureConfig.sourceId) {
+          chosenSource = sources.find((s) => s.id === pendingCaptureConfig.sourceId);
+        }
+        if (!chosenSource && sources.length > 0) {
+          chosenSource = sources[0];
+        }
 
-      if (!chosenSource) {
+        if (!chosenSource) {
+          callback({});
+          return;
+        }
+
+        const response = { video: chosenSource };
+        if (
+          pendingCaptureConfig.includeSystemAudio &&
+          pendingCaptureConfig.useFallbackSystemLoopback
+        ) {
+          response.audio = 'loopback';
+        }
+        callback(response);
+      } catch (err) {
+        console.error('Erro no setDisplayMediaRequestHandler:', err);
         callback({});
-        return;
       }
-
-      const response = { video: chosenSource };
-      // 'loopback' (áudio do sistema) só existe no Windows; no Linux o áudio não é capturado por aqui
-      if (
-        process.platform === 'win32' &&
-        pendingCaptureConfig.includeSystemAudio &&
-        pendingCaptureConfig.useFallbackSystemLoopback
-      ) {
-        response.audio = 'loopback';
-      }
-      callback(response);
-    } catch (err) {
-      console.error('Erro no setDisplayMediaRequestHandler:', err);
-      callback({});
-    }
-  });
+    });
+  }
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 

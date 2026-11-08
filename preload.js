@@ -67,5 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = () => callback();
     ipcRenderer.on('app:prepare-close', listener);
     return () => ipcRenderer.removeListener('app:prepare-close', listener);
-  }
+  },
+
+  platform: process.platform
 });

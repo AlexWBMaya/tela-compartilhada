@@ -1277,7 +1277,11 @@ export class MultiStreamRoomEngine {
 
     let newStream = null;
 
-    // 1ª tentativa: getDisplayMedia nativo (captura WGC de alto FPS)
+    const isLinux =
+      (typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent)) ||
+      (window.electronAPI?.platform === 'linux');
+
+    // 1ª tentativa: getDisplayMedia nativo (WGC no Windows / PipeWire nativo no Linux)
     try {
       newStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -1285,29 +1289,27 @@ export class MultiStreamRoomEngine {
           height: { ideal: height, max: height },
           frameRate: { ideal: fps, max: fps }
         },
-        audio: useFallbackSystemLoopback
+        audio: isLinux ? false : useFallbackSystemLoopback
       });
     } catch (err) {
-      console.warn('getDisplayMedia falhou, tentando novamente sem áudio de sistema:', err);
-      // Em alguns sistemas (ex.: Linux) o pedido de áudio de sistema não é suportado
-      if (useFallbackSystemLoopback) {
-        try {
-          newStream = await navigator.mediaDevices.getDisplayMedia({
-            video: {
-              width: { ideal: width, max: width },
-              height: { ideal: height, max: height },
-              frameRate: { ideal: fps, max: fps }
-            },
-            audio: false
-          });
-        } catch (retryErr) {
-          console.warn('getDisplayMedia sem áudio também falhou, usando fallback desktopCapturer getUserMedia:', retryErr);
-        }
+      console.warn('getDisplayMedia inicial falhou, tentando novamente apenas com vídeo:', err);
+      try {
+        newStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            width: { ideal: width, max: width },
+            height: { ideal: height, max: height },
+            frameRate: { ideal: fps, max: fps }
+          },
+          audio: false
+        });
+      } catch (retryErr) {
+        console.warn('getDisplayMedia apenas com vídeo também falhou:', retryErr);
       }
     }
 
-    // 2ª tentativa (Fallback direto por sourceId via chromeMediaSource: 'desktop')
-    if (!newStream && sourceId) {
+    // 2ª tentativa (Apenas no Windows: fallback por sourceId via desktopCapturer)
+    // No Linux NUNCA usar chromeMediaSource desktop porque ele invoca XGetImage (X11) e gera tela preta no Wayland!
+    if (!newStream && sourceId && !isLinux) {
       const videoConstraints = {
         mandatory: {
           chromeMediaSource: 'desktop',
