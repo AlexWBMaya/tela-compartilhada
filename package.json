@@ -1,6 +1,6 @@
 {
   "name": "tela-compartilhada",
-  "version": "1.5.8",
+  "version": "1.5.9",
   "description": "Aplicativo para compartilhar tela com amigos",
   "main": "main.js",
   "scripts": {
@@ -35,7 +35,8 @@
       "signAndEditExecutable": false
     },
     "portable": {
-      "artifactName": "TelaCompartilhada.exe"
+      "artifactName": "TelaCompartilhada.exe",
+      "unpackDirName": "TelaCompartilhada"
     },
     "linux": {
       "target": [

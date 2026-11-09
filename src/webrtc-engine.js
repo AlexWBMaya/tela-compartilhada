@@ -61,26 +61,6 @@ export function mungeSDP(sdp, preferredCodec = 'VP9') {
 
     if (line.startsWith('m=video ')) {
       inVideo = true;
-      const parts = line.split(' ');
-      const header = parts.slice(0, 3).join(' ');
-      const pts = parts.slice(3);
-
-      if (preferredCodec) {
-        const prefUpper = preferredCodec.toUpperCase();
-        const preferredPts = [];
-        const otherPts = [];
-
-        for (const pt of pts) {
-          const codecName = videoCodecs.get(pt);
-          if (codecName === prefUpper) {
-            preferredPts.push(pt);
-          } else {
-            otherPts.push(pt);
-          }
-        }
-        line = `${header} ${[...preferredPts, ...otherPts].join(' ')}`;
-      }
-
       result.push(line);
       result.push('b=AS:35000');
       result.push('b=TIAS:35000000');
@@ -716,13 +696,15 @@ export class MultiStreamRoomEngine {
 
   _hasActiveOutgoingCall(remotePeerId) {
     const call = this.outgoingCalls.get(remotePeerId);
-    if (!call) return false;
-    const state = call.peerConnection?.connectionState;
-    const ice = call.peerConnection?.iceConnectionState;
+    if (!call || call._ssproReplaced) return false;
+    const pc = call.peerConnection;
+    if (!pc) return true; // chamada acabou de ser instanciada e está abrindo
+    const state = pc.connectionState;
+    const ice = pc.iceConnectionState;
     if (state === 'closed' || state === 'failed' || ice === 'closed' || ice === 'failed') {
       return false;
     }
-    return true;
+    return true; // ativa ou em conexão ('new', 'connecting', 'connected')
   }
 
   _registerDataConnection(conn) {
@@ -899,19 +881,13 @@ export class MultiStreamRoomEngine {
           }
           if (peerEntry.sharing && !peerEntry.remoteStream) {
             this._sendToPeer(remotePeerId, { type: 'request-stream' });
-            setTimeout(() => {
-              const current = this.peers.get(remotePeerId);
-              if (current && current.sharing && !current.remoteStream) {
-                this._sendToPeer(remotePeerId, { type: 'request-stream' });
-              }
-            }, 1200);
           }
           this._notifyPeersUpdated();
           break;
         }
 
         case 'request-stream': {
-          if (this.isSharing && this.localStream) {
+          if (this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
             this._callPeerWithScreen(remotePeerId);
           }
           break;
@@ -1645,6 +1621,10 @@ export class MultiStreamRoomEngine {
 
   _callPeerWithScreen(remotePeerId) {
     if (!this.peer || this.peer.destroyed || !this.localStream || !this.isSharing) return;
+
+    if (this._hasActiveOutgoingCall(remotePeerId)) {
+      return;
+    }
 
     const existingCall = this.outgoingCalls.get(remotePeerId);
     if (existingCall) {
