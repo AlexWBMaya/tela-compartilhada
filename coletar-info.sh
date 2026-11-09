@@ -8,7 +8,7 @@ set -u
 
 REPO="AlexWBMaya/tela-compartilhada"
 EXPECTED_TAG="v1.5.10"
-EXPECTED_SHA256="4ce0bce122069afebe01310c3e173634d9d97ffc14c894c12a6ec03d8fe8a969"
+EXPECTED_SHA256="0423746efa3527879f231fa2066d8a00aeb9b8f806df8adb03f78e149a0d256f"
 APP_IMAGE="./TelaCompartilhada.AppImage"
 LOG_RAW="webrtc_debug.log"
 REPORT="relatorio_amigo.txt"
