@@ -8,6 +8,7 @@ set -u
 
 REPO="AlexWBMaya/tela-compartilhada"
 RELEASE_TAG="v1.5.8"
+EXPECTED_SHA256="4ce0bce122069afebe01310c3e173634d9d97ffc14c894c12a6ec03d8fe8a969"
 APP_IMAGE="./TelaCompartilhada.AppImage"
 LOG_FILE="log_teste_amigo.log"
 
@@ -62,7 +63,7 @@ echo ""
 baixar_appimage() {
     echo -e "${CYAN}Baixando a versão oficial ${BOLD}${RELEASE_TAG}${NC}${CYAN} do GitHub...${NC}"
     URL="https://github.com/$REPO/releases/download/$RELEASE_TAG/TelaCompartilhada.AppImage"
-    
+    rm -f "$APP_IMAGE"
     if command -v curl &>/dev/null; then
         curl -fL "$URL" -o "$APP_IMAGE" --progress-bar
     elif command -v wget &>/dev/null; then
@@ -87,7 +88,19 @@ if [ ! -f "$APP_IMAGE" ]; then
 else
     chmod +x "$APP_IMAGE"
     TAMANHO=$(ls -lh "$APP_IMAGE" | awk '{print $5}')
-    echo -e "${GREEN}✓ AppImage encontrado:${NC} ${APP_IMAGE} (${TAMANHO})"
+    CURRENT_HASH=""
+    if command -v sha256sum &>/dev/null; then
+        CURRENT_HASH=$(sha256sum "$APP_IMAGE" | awk '{print $1}')
+    fi
+    if [ "$CURRENT_HASH" != "$EXPECTED_SHA256" ]; then
+        echo -e "${RED}${BOLD}ATENÇÃO: O AppImage local é antigo (não é a v1.5.8 corrigida)!${NC}"
+        read -rp "Deseja baixar a v1.5.8 corrigida agora? (S/n): " AUTO_DOWN
+        if [[ ! "$AUTO_DOWN" =~ ^[Nn] ]]; then
+            baixar_appimage || exit 1
+        fi
+    else
+        echo -e "${GREEN}✓ AppImage confirmado: v1.5.8 oficial (${TAMANHO})${NC}"
+    fi
 fi
 
 # Menu Interativo
