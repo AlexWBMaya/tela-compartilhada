@@ -191,16 +191,20 @@ const engine = new MultiStreamRoomEngine({
       muted: existing?.muted ?? uiState.allMuted
     });
 
+    uiState.minimizedStreams.delete(peerId);
+
     if (uiState.layoutMode === 'single') {
-      if (!uiState.spotlightStreamId || uiState.spotlightStreamId === 'local') {
-        // Se eu estava vendo apenas a minha própria prévia local, dá preferência à tela do amigo!
+      const hasValidSpotlight =
+        uiState.spotlightStreamId &&
+        uiState.activeStreams.has(uiState.spotlightStreamId) &&
+        uiState.spotlightStreamId !== 'local';
+
+      if (!hasValidSpotlight) {
+        // Se eu estava vendo apenas a minha própria prévia local ou nada, dá preferência à tela do amigo!
         uiState.spotlightStreamId = peerId;
-        uiState.minimizedStreams.delete(peerId);
         if (uiState.activeStreams.has('local')) {
           uiState.minimizedStreams.add('local');
         }
-      } else if (uiState.spotlightStreamId !== peerId) {
-        uiState.minimizedStreams.add(peerId);
       }
     } else {
       if (!uiState.spotlightStreamId || uiState.spotlightStreamId === 'local') {
@@ -474,7 +478,7 @@ function syncStreamsStage() {
   // Atualiza visibilidade de rede para cada peer
   for (const [id, info] of uiState.activeStreams.entries()) {
     if (info.isLocal) continue;
-    const isVisible = !uiState.minimizedStreams.has(id);
+    const isVisible = visibleStreams.some((s) => s.id === id);
     let tier = 'high';
     if (uiState.layoutMode === 'spotlight' && uiState.spotlightStreamId !== id) {
       tier = 'thumbnail';
@@ -1101,7 +1105,7 @@ function getSelectedQualityConfig() {
   const fps = Number(el.selectFps.value) || 60;
   const bitrateMbps = Number(el.bitrateSlider.value) || 10;
   const codec = el.selectCodec.value || 'VP9';
-  const contentHint = el.selectPriority.value || 'motion';
+  const contentHint = el.selectPriority.value || 'detail';
   const audioTargetSourceId = el.selectAudioTarget?.value || 'active';
 
   return {
@@ -1115,7 +1119,7 @@ function getSelectedQualityConfig() {
     bitrateMbps,
     codec,
     contentHint,
-    degradationPreference: contentHint === 'detail' ? 'maintain-resolution' : 'maintain-framerate'
+    degradationPreference: 'balanced'
   };
 }
 

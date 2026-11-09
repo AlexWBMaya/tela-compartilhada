@@ -13,6 +13,167 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.cloudflare.com:3478' }
 ];
 
+/**
+ * Munging de SDP para WebRTC (Chromium / Electron).
+ * Injeta parâmetros proprietários do Google que eliminam o gargalo inicial de 300 kbps:
+ * - x-google-start-bitrate=4000 (inicia em 4 Mbps, permitindo que o 1º frame 1080p/60fps seja transmitido sem ser descartado)
+ * - x-google-min-bitrate=1500 (mantém no mínimo 1.5 Mbps, evitando queda de qualidade severa)
+ * - b=AS:35000 / b=TIAS:35000000 (teto de largura de banda de até 35 Mbps)
+ * - Priorização de codecs na linha m=video (VP9 / H264 / VP8)
+ */
+export function mungeSDP(sdp, preferredCodec = 'VP9') {
+  if (!sdp || typeof sdp !== 'string') return sdp;
+
+  const rawLines = sdp.split(/\r\n|\n/);
+  const result = [];
+  let inVideo = false;
+  const videoCodecs = new Map(); // pt -> codecName
+  const fmtpFound = new Set();
+
+  let scanVideo = false;
+  for (const line of rawLines) {
+    if (line.startsWith('m=video ')) {
+      scanVideo = true;
+    } else if (line.startsWith('m=audio ') || line.startsWith('m=application ')) {
+      scanVideo = false;
+    }
+    if (scanVideo && line.startsWith('a=rtpmap:')) {
+      const match = /^a=rtpmap:(\d+)\s+([A-Za-z0-9_-]+)/i.exec(line);
+      if (match) {
+        videoCodecs.set(match[1], match[2].toUpperCase());
+      }
+    }
+  }
+
+  function injectMissingFmtp() {
+    for (const [pt, codecName] of videoCodecs.entries()) {
+      if (['VP8', 'VP9', 'H264', 'AV1'].includes(codecName)) {
+        if (!fmtpFound.has(pt)) {
+          result.push(`a=fmtp:${pt} x-google-min-bitrate=1500;x-google-start-bitrate=4000;x-google-max-bitrate=35000`);
+          fmtpFound.add(pt);
+        }
+      }
+    }
+  }
+
+  for (let i = 0; i < rawLines.length; i++) {
+    let line = rawLines[i];
+
+    if (line.startsWith('m=video ')) {
+      inVideo = true;
+      const parts = line.split(' ');
+      const header = parts.slice(0, 3).join(' ');
+      const pts = parts.slice(3);
+
+      if (preferredCodec) {
+        const prefUpper = preferredCodec.toUpperCase();
+        const preferredPts = [];
+        const otherPts = [];
+
+        for (const pt of pts) {
+          const codecName = videoCodecs.get(pt);
+          if (codecName === prefUpper) {
+            preferredPts.push(pt);
+          } else {
+            otherPts.push(pt);
+          }
+        }
+        line = `${header} ${[...preferredPts, ...otherPts].join(' ')}`;
+      }
+
+      result.push(line);
+      result.push('b=AS:35000');
+      result.push('b=TIAS:35000000');
+      continue;
+    } else if (line.startsWith('m=audio ') || line.startsWith('m=application ')) {
+      if (inVideo) {
+        injectMissingFmtp();
+        inVideo = false;
+      }
+    }
+
+    if (inVideo) {
+      if (line.startsWith('b=AS:') || line.startsWith('b=TIAS:')) {
+        continue;
+      }
+
+      if (line.startsWith('a=fmtp:')) {
+        const match = /^a=fmtp:(\d+)\s*(.*)$/.exec(line);
+        if (match) {
+          const pt = match[1];
+          fmtpFound.add(pt);
+          const codecName = videoCodecs.get(pt) || '';
+          const isPrimaryCodec = ['VP8', 'VP9', 'H264', 'AV1'].includes(codecName);
+          let params = match[2] || '';
+
+          if (isPrimaryCodec && !params.includes('x-google-min-bitrate')) {
+            if (params.length > 0 && !params.endsWith(';')) {
+              params += ';';
+            }
+            params += 'x-google-min-bitrate=1500;x-google-start-bitrate=4000;x-google-max-bitrate=35000';
+          }
+          line = `a=fmtp:${pt} ${params}`;
+        }
+      }
+    }
+
+    result.push(line);
+  }
+
+  if (inVideo) {
+    injectMissingFmtp();
+  }
+
+  return result.join('\r\n');
+}
+
+export function installWebRTCSDPPatcher() {
+  if (typeof window === 'undefined' || !window.RTCPeerConnection) return;
+  if (window.RTCPeerConnection._ssproPatched) return;
+  window.RTCPeerConnection._ssproPatched = true;
+
+  const origSetLocalDescription = window.RTCPeerConnection.prototype.setLocalDescription;
+  window.RTCPeerConnection.prototype.setLocalDescription = function (description) {
+    if (description && description.sdp) {
+      const preferred = window.__sspro_preferred_codec || 'VP9';
+      description = new RTCSessionDescription({
+        type: description.type,
+        sdp: mungeSDP(description.sdp, preferred)
+      });
+    }
+    return origSetLocalDescription.apply(this, arguments);
+  };
+
+  const origCreateOffer = window.RTCPeerConnection.prototype.createOffer;
+  window.RTCPeerConnection.prototype.createOffer = async function () {
+    const offer = await origCreateOffer.apply(this, arguments);
+    if (offer && offer.sdp) {
+      const preferred = window.__sspro_preferred_codec || 'VP9';
+      return new RTCSessionDescription({
+        type: offer.type,
+        sdp: mungeSDP(offer.sdp, preferred)
+      });
+    }
+    return offer;
+  };
+
+  const origCreateAnswer = window.RTCPeerConnection.prototype.createAnswer;
+  window.RTCPeerConnection.prototype.createAnswer = async function () {
+    const answer = await origCreateAnswer.apply(this, arguments);
+    if (answer && answer.sdp) {
+      const preferred = window.__sspro_preferred_codec || 'VP9';
+      return new RTCSessionDescription({
+        type: answer.type,
+        sdp: mungeSDP(answer.sdp, preferred)
+      });
+    }
+    return answer;
+  };
+}
+
+// Instala o patcher imediatamente ao carregar o motor WebRTC
+installWebRTCSDPPatcher();
+
 export const QUALITY_PRESETS = {
   'gamer-eco': {
     id: 'gamer-eco',
@@ -24,8 +185,8 @@ export const QUALITY_PRESETS = {
     fps: 60,
     bitrateMbps: 4,
     codec: 'VP9',
-    contentHint: 'motion',
-    degradationPreference: 'maintain-framerate'
+    contentHint: 'detail',
+    degradationPreference: 'balanced'
   },
   'balanced-60': {
     id: 'balanced-60',
@@ -37,8 +198,8 @@ export const QUALITY_PRESETS = {
     fps: 60,
     bitrateMbps: 10,
     codec: 'VP9',
-    contentHint: 'motion',
-    degradationPreference: 'maintain-framerate'
+    contentHint: 'detail',
+    degradationPreference: 'balanced'
   },
   'high-1080': {
     id: 'high-1080',
@@ -50,8 +211,8 @@ export const QUALITY_PRESETS = {
     fps: 60,
     bitrateMbps: 18,
     codec: 'VP9',
-    contentHint: 'motion',
-    degradationPreference: 'maintain-framerate'
+    contentHint: 'detail',
+    degradationPreference: 'balanced'
   },
   'ultra-1440': {
     id: 'ultra-1440',
@@ -63,8 +224,8 @@ export const QUALITY_PRESETS = {
     fps: 60,
     bitrateMbps: 25,
     codec: 'VP9',
-    contentHint: 'motion',
-    degradationPreference: 'maintain-framerate'
+    contentHint: 'detail',
+    degradationPreference: 'balanced'
   },
   'insane-120': {
     id: 'insane-120',
@@ -76,8 +237,8 @@ export const QUALITY_PRESETS = {
     fps: 120,
     bitrateMbps: 35,
     codec: 'VP9',
-    contentHint: 'motion',
-    degradationPreference: 'maintain-framerate'
+    contentHint: 'detail',
+    degradationPreference: 'balanced'
   }
 };
 
@@ -1346,11 +1507,11 @@ export class MultiStreamRoomEngine {
       }
     }
 
-    // Aplica dica de conteúdo (motion = prioriza fluidez de FPS em jogos; detail = prioriza nitidez de texto)
+    // Aplica dica de conteúdo (detail = prioriza nitidez e evita descarte agressivo de keyframes pelo encoder WebRTC)
     const videoTrack = newStream.getVideoTracks()[0];
     if (videoTrack) {
       try {
-        videoTrack.contentHint = contentHint || 'motion';
+        videoTrack.contentHint = contentHint || 'detail';
       } catch (_) {}
 
       videoTrack.enabled = true;
@@ -1430,7 +1591,7 @@ export class MultiStreamRoomEngine {
     const videoTrack = this.localStream.getVideoTracks()[0];
     if (videoTrack) {
       try {
-        videoTrack.contentHint = this.qualityConfig.contentHint || 'motion';
+        videoTrack.contentHint = this.qualityConfig.contentHint || 'detail';
         await videoTrack.applyConstraints({
           width: { ideal: this.qualityConfig.width, max: this.qualityConfig.width },
           height: { ideal: this.qualityConfig.height, max: this.qualityConfig.height },
@@ -1603,7 +1764,7 @@ export class MultiStreamRoomEngine {
           }
 
           params.degradationPreference =
-            this.qualityConfig.degradationPreference || 'maintain-framerate';
+            this.qualityConfig.degradationPreference || 'balanced';
 
           const encoding = params.encodings[0];
           // Mantém o encoder WebRTC sempre ativo para evitar congelamento em 0.0 Mbps / tela preta
@@ -1611,15 +1772,19 @@ export class MultiStreamRoomEngine {
 
           const isThumbnailScale = this.smartScalingEnabled && (viewerTier === 'thumbnail' || !isVisibleOnViewer);
           const targetBitrateMbps = !isVisibleOnViewer
-            ? 1.0 // Modo standby de baixo consumo quando minimizado
+            ? Math.max(3.0, Math.round(this.qualityConfig.bitrateMbps * 0.35)) // Mínimo de 3 Mbps em standby (evita descarte de frames)
             : isThumbnailScale
-            ? Math.max(2.5, Math.round(this.qualityConfig.bitrateMbps * 0.45))
+            ? Math.max(4.0, Math.round(this.qualityConfig.bitrateMbps * 0.50))
             : this.qualityConfig.bitrateMbps;
 
           encoding.maxBitrate = Math.round(targetBitrateMbps * 1_000_000);
-          encoding.maxFramerate = !isVisibleOnViewer ? 15 : this.qualityConfig.fps;
+          try {
+            encoding.minBitrate = Math.round(Math.min(1.5, targetBitrateMbps * 0.3) * 1_000_000);
+          } catch (_) {}
+          encoding.maxFramerate = !isVisibleOnViewer ? 20 : this.qualityConfig.fps;
           encoding.scaleResolutionDownBy = isThumbnailScale ? 1.5 : 1.0;
           encoding.priority = 'high';
+          encoding.networkPriority = 'high';
 
           await sender.setParameters(params);
         } catch (err) {
