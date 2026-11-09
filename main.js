@@ -39,7 +39,7 @@ if (underWine) {
   //    No Linux (especialmente em placas NVIDIA e certos drivers Mesa no CachyOS/Arch), o VA-API
   //    causa tela preta tanto na decodificação de vídeo recebido quanto na codificação de envio.
   //    O software decoding/encoding (libvpx/ffmpeg/dav1d) com multi-threading AVX2 é ultra leve e 100% estável.
-  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns,VaapiVideoEncoder,VaapiVideoDecoder,PlatformHEVCEncoderSupport');
+  app.commandLine.appendSwitch('disable-features', 'VaapiVideoEncoder,VaapiVideoDecoder,PlatformHEVCEncoderSupport');
   app.commandLine.appendSwitch('enable-gpu-rasterization');
 } else {
   // Windows nativo: DXVA/D3D11 aceleração máxima por hardware
@@ -49,7 +49,6 @@ if (underWine) {
   app.commandLine.appendSwitch('enable-accelerated-video-decode');
   app.commandLine.appendSwitch('enable-accelerated-video-encode');
   app.commandLine.appendSwitch('enable-features', 'PlatformHEVCEncoderSupport');
-  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
 }
 
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
@@ -1071,7 +1070,32 @@ ipcMain.on('remote-input:execute', (_event, evt) => {
   executeRemoteInputEvent(evt);
 });
 
+function ensureWindowsFirewall() {
+  if (process.platform !== 'win32') return;
+  try {
+    const exePath = process.execPath;
+    const ruleName = 'Tela Compartilhada';
+    // Adiciona silenciosamente exceção no firewall do Windows para que conexões WebRTC P2P
+    // não sejam descartadas mesmo em redes públicas ou atrás de perfis restritos
+    const child = spawn('netsh', [
+      'advfirewall', 'firewall', 'add', 'rule',
+      `name=${ruleName}`,
+      'dir=in',
+      'action=allow',
+      `program=${exePath}`,
+      'enable=yes',
+      'profile=any'
+    ], {
+      windowsHide: true,
+      stdio: 'ignore',
+      detached: true
+    });
+    child.unref();
+  } catch (_) {}
+}
+
 app.whenReady().then(() => {
+  ensureWindowsFirewall();
   setTimeout(() => {
     try {
       ensureAudioWorkerBinary();

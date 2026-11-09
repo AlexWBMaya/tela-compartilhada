@@ -584,6 +584,16 @@ function createStreamCardElement(info) {
   videoEl.addEventListener('canplay', () => {
     videoEl.play().catch(() => {});
   });
+  if (info.stream) {
+    info.stream.addEventListener('active', () => {
+      videoEl.play().catch(() => {});
+    });
+    for (const track of info.stream.getVideoTracks()) {
+      track.addEventListener('unmute', () => {
+        videoEl.play().catch(() => {});
+      });
+    }
+  }
 
   const muteBtn = card.querySelector('.btn-mute-toggle');
   const volumeSlider = card.querySelector('.stream-volume-slider');

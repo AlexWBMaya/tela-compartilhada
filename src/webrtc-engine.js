@@ -10,8 +10,30 @@ const ICE_SERVERS = [
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'stun:stun4.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' }
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.nextcloud.com:443' },
+  { urls: 'stun:stun.sipgate.net:3478' }
 ];
+
+/**
+ * Filtro de candidatos ICE de adaptadores virtuais e sub-redes isoladas.
+ * Evita o envenenamento da negociação WebRTC por adaptadores como:
+ * - 26.0.0.0/8 (Radmin VPN - bloco não roteável publicamente que causa timeout de 15s)
+ * - 25.0.0.0/8 (LogMeIn Hamachi)
+ * - 169.254.0.0/16 (APIPA link-local auto-configurado sem gateway)
+ * - 172.16.0.0/12 (172.16 - 172.31: WSL / Hyper-V vEthernet / Docker)
+ * - 192.168.56.0/24 (VirtualBox Host-Only)
+ */
+export function isBogusCandidate(candidateStrOrObj) {
+  if (!candidateStrOrObj) return false;
+  const str = typeof candidateStrOrObj === 'string'
+    ? candidateStrOrObj
+    : (candidateStrOrObj.candidate || candidateStrOrObj.address || candidateStrOrObj.ip || '');
+  if (!str || typeof str !== 'string') return false;
+
+  const bogusRegex = /\b(?:25\.\d{1,3}\.\d{1,3}\.\d{1,3}|26\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.56\.\d{1,3})\b/;
+  return bogusRegex.test(str);
+}
 
 /**
  * Munging de SDP para WebRTC (Chromium / Electron).
@@ -20,6 +42,7 @@ const ICE_SERVERS = [
  * - x-google-min-bitrate=1500 (mantém no mínimo 1.5 Mbps, evitando queda de qualidade severa)
  * - b=AS:35000 / b=TIAS:35000000 (teto de largura de banda de até 35 Mbps)
  * - Priorização de codecs na linha m=video (VP9 / H264 / VP8)
+ * - Remoção de candidatos ICE de adaptadores virtuais
  */
 export function mungeSDP(sdp, preferredCodec = 'VP9') {
   if (!sdp || typeof sdp !== 'string') return sdp;
@@ -58,6 +81,11 @@ export function mungeSDP(sdp, preferredCodec = 'VP9') {
 
   for (let i = 0; i < rawLines.length; i++) {
     let line = rawLines[i];
+
+    // Descarta candidatos de interfaces virtuais diretamente do SDP
+    if (line.startsWith('a=candidate:') && isBogusCandidate(line)) {
+      continue;
+    }
 
     if (line.startsWith('m=video ')) {
       inVideo = true;
@@ -124,6 +152,18 @@ export function installWebRTCSDPPatcher() {
     return origSetLocalDescription.apply(this, arguments);
   };
 
+  const origSetRemoteDescription = window.RTCPeerConnection.prototype.setRemoteDescription;
+  window.RTCPeerConnection.prototype.setRemoteDescription = function (description) {
+    if (description && description.sdp) {
+      const preferred = window.__sspro_preferred_codec || 'VP9';
+      description = new RTCSessionDescription({
+        type: description.type,
+        sdp: mungeSDP(description.sdp, preferred)
+      });
+    }
+    return origSetRemoteDescription.apply(this, arguments);
+  };
+
   const origCreateOffer = window.RTCPeerConnection.prototype.createOffer;
   window.RTCPeerConnection.prototype.createOffer = async function () {
     const offer = await origCreateOffer.apply(this, arguments);
@@ -149,6 +189,70 @@ export function installWebRTCSDPPatcher() {
     }
     return answer;
   };
+
+  // Bloqueia a adição de candidatos de interfaces virtuais recebidos remotamente
+  const origAddIceCandidate = window.RTCPeerConnection.prototype.addIceCandidate;
+  window.RTCPeerConnection.prototype.addIceCandidate = function (candidate, ...args) {
+    if (candidate) {
+      const candStr = typeof candidate === 'string' ? candidate : (candidate.candidate || '');
+      if (isBogusCandidate(candStr)) {
+        return Promise.resolve();
+      }
+    }
+    return origAddIceCandidate.apply(this, [candidate, ...args]);
+  };
+
+  // Intercepta setter de onicecandidate para não transmitir candidatos locais virtuais
+  try {
+    const origOnIceCandidateDesc = Object.getOwnPropertyDescriptor(
+      window.RTCPeerConnection.prototype,
+      'onicecandidate'
+    );
+    if (origOnIceCandidateDesc && origOnIceCandidateDesc.set) {
+      Object.defineProperty(window.RTCPeerConnection.prototype, 'onicecandidate', {
+        set(handler) {
+          if (typeof handler !== 'function') {
+            return origOnIceCandidateDesc.set.call(this, handler);
+          }
+          const filteredHandler = function (event) {
+            if (event && event.candidate) {
+              const candStr = event.candidate.candidate || '';
+              if (isBogusCandidate(candStr)) {
+                return;
+              }
+            }
+            return handler.apply(this, arguments);
+          };
+          return origOnIceCandidateDesc.set.call(this, filteredHandler);
+        },
+        get() {
+          return origOnIceCandidateDesc.get.call(this);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+  } catch (_) {}
+
+  // Intercepta addEventListener('icecandidate')
+  try {
+    const origAddEventListener = window.RTCPeerConnection.prototype.addEventListener;
+    window.RTCPeerConnection.prototype.addEventListener = function (type, listener, options) {
+      if (type === 'icecandidate' && typeof listener === 'function') {
+        const filteredListener = function (event) {
+          if (event && event.candidate) {
+            const candStr = event.candidate.candidate || '';
+            if (isBogusCandidate(candStr)) {
+              return;
+            }
+          }
+          return listener.apply(this, arguments);
+        };
+        return origAddEventListener.call(this, type, filteredListener, options);
+      }
+      return origAddEventListener.apply(this, arguments);
+    };
+  } catch (_) {}
 }
 
 // Instala o patcher imediatamente ao carregar o motor WebRTC
@@ -446,6 +550,7 @@ export class MultiStreamRoomEngine {
           secure: true,
           config: {
             iceServers: ICE_SERVERS,
+            iceCandidatePoolSize: 2,
             sdpSemantics: 'unified-plan'
           },
           debug: 1
@@ -1677,6 +1782,24 @@ export class MultiStreamRoomEngine {
       pc.addEventListener('connectionstatechange', () => {
         if (pc.connectionState === 'connected') {
           this._applyEncodingForPeer(remotePeerId);
+        } else if (pc.connectionState === 'failed') {
+          try {
+            if (typeof pc.restartIce === 'function') {
+              pc.restartIce();
+            }
+          } catch (_) {}
+        }
+      });
+
+      pc.addEventListener('iceconnectionstatechange', () => {
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          this._applyEncodingForPeer(remotePeerId);
+        } else if (pc.iceConnectionState === 'failed') {
+          try {
+            if (typeof pc.restartIce === 'function') {
+              pc.restartIce();
+            }
+          } catch (_) {}
         }
       });
     }
