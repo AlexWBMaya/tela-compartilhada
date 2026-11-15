@@ -67,8 +67,18 @@ let overlayState = {
 let pendingCaptureConfig = {
   sourceId: null,
   includeSystemAudio: true,
-  useFallbackSystemLoopback: false
+  useFallbackSystemLoopback: false,
+  forceSourcesEnum: false
 };
+
+let displayMediaRequestInFlight = false;
+
+function isWaylandLinuxSession() {
+  return (
+    process.platform === 'linux' &&
+    (process.env.XDG_SESSION_TYPE === 'wayland' || Boolean(process.env.WAYLAND_DISPLAY))
+  );
+}
 
 let latestUpdateInfo = null;
 
@@ -96,8 +106,25 @@ function createMainWindow() {
   });
 
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    if (displayMediaRequestInFlight) {
+      callback({});
+      return;
+    }
+    displayMediaRequestInFlight = true;
     try {
-      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
+      // No Linux Wayland, chamar desktopCapturer.getSources() abre o portal nativo pela 1a vez,
+      // e o WebRTCPipeWireCapturer abre pela 2a vez quando recebe o stream. Passar o descritor
+      // diretamente evita o dialogo duplicado e deixa apenas o seletor nativo do PipeWire.
+      if (isWaylandLinuxSession() && !pendingCaptureConfig.forceSourcesEnum) {
+        callback({
+          video: { id: 'screen:0:0', name: 'Tela do Sistema' }
+        });
+        return;
+      }
+
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window']
+      });
       let chosenSource = null;
 
       if (pendingCaptureConfig.sourceId) {
@@ -124,10 +151,18 @@ function createMainWindow() {
     } catch (err) {
       console.error('Erro no setDisplayMediaRequestHandler:', err);
       callback({});
+    } finally {
+      displayMediaRequestInFlight = false;
     }
   });
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+
+  mainWindow.webContents.on('console-message', (_event, _level, message) => {
+    if (typeof message === 'string' && message.includes('[SSPRO-')) {
+      console.log(message);
+    }
+  });
 
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     console.error('Render process gone:', details);
@@ -982,7 +1017,18 @@ function setClickThrough(enabled) {
 // ============================================================================
 // HANDLERS IPC
 // ============================================================================
+ipcMain.handle('app:get-environment', () => ({
+  platform: process.platform,
+  isWayland: isWaylandLinuxSession()
+}));
+
 ipcMain.handle('desktop:get-sources', async () => {
+  // No Wayland/PipeWire, chamar desktopCapturer.getSources() abre o diálogo nativo do portal.
+  // Evitamos essa chamada antecipada para que o seletor do sistema apareça apenas ao iniciar a transmissão.
+  if (isWaylandLinuxSession()) {
+    return [];
+  }
+
   const sources = await desktopCapturer.getSources({
     types: ['screen', 'window'],
     thumbnailSize: { width: 440, height: 248 },
@@ -1003,7 +1049,8 @@ ipcMain.handle('desktop:prepare-capture', (_event, config) => {
   pendingCaptureConfig = {
     sourceId: config?.sourceId || null,
     includeSystemAudio: Boolean(config?.includeSystemAudio),
-    useFallbackSystemLoopback: Boolean(config?.useFallbackSystemLoopback)
+    useFallbackSystemLoopback: Boolean(config?.useFallbackSystemLoopback),
+    forceSourcesEnum: Boolean(config?.forceSourcesEnum)
   };
   return true;
 });

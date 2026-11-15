@@ -396,6 +396,7 @@ kbd {
 }
 
 .field-group input[type='text'],
+.field-group input[type='password'],
 .field-group select {
   background: #101010;
   border: 1px solid var(--border-subtle);
@@ -407,6 +408,7 @@ kbd {
 }
 
 .field-group input[type='text']:focus,
+.field-group input[type='password']:focus,
 .field-group select:focus {
   border-color: var(--border-focus);
 }

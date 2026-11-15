@@ -15,6 +15,40 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.sipgate.net:3478' }
 ];
 
+export function loadSavedTurnConfig() {
+  try {
+    const raw = localStorage.getItem('sspro_turn_config');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.urls !== 'string' || !parsed.urls.trim()) return null;
+    return {
+      urls: parsed.urls.trim(),
+      username: (parsed.username || '').trim(),
+      credential: (parsed.credential || '').trim()
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+export function buildIceServers(customTurn = null) {
+  const servers = [...ICE_SERVERS];
+  const turn = customTurn || loadSavedTurnConfig();
+  if (turn && turn.urls) {
+    const urls = turn.urls
+      .split(',')
+      .map((u) => u.trim())
+      .filter((u) => /^turns?:/i.test(u));
+    if (urls.length > 0) {
+      const entry = { urls: urls.length === 1 ? urls[0] : urls };
+      if (turn.username) entry.username = turn.username;
+      if (turn.credential) entry.credential = turn.credential;
+      servers.push(entry);
+    }
+  }
+  return servers;
+}
+
 /**
  * Filtro de candidatos ICE de adaptadores virtuais e sub-redes isoladas.
  * Evita o envenenamento da negociação WebRTC por adaptadores como:
@@ -72,7 +106,7 @@ export function mungeSDP(sdp, preferredCodec = 'VP9') {
     for (const [pt, codecName] of videoCodecs.entries()) {
       if (['VP8', 'VP9', 'H264', 'AV1'].includes(codecName)) {
         if (!fmtpFound.has(pt)) {
-          result.push(`a=fmtp:${pt} x-google-min-bitrate=1500;x-google-start-bitrate=4000;x-google-max-bitrate=35000`);
+          result.push(`a=fmtp:${pt} x-google-min-bitrate=300;x-google-start-bitrate=1500;x-google-max-bitrate=35000`);
           fmtpFound.add(pt);
         }
       }
@@ -118,7 +152,7 @@ export function mungeSDP(sdp, preferredCodec = 'VP9') {
             if (params.length > 0 && !params.endsWith(';')) {
               params += ';';
             }
-            params += 'x-google-min-bitrate=1500;x-google-start-bitrate=4000;x-google-max-bitrate=35000';
+            params += 'x-google-min-bitrate=300;x-google-start-bitrate=1500;x-google-max-bitrate=35000';
           }
           line = `a=fmtp:${pt} ${params}`;
         }
@@ -141,7 +175,7 @@ export function installWebRTCSDPPatcher() {
   window.RTCPeerConnection._ssproPatched = true;
 
   const origSetLocalDescription = window.RTCPeerConnection.prototype.setLocalDescription;
-  window.RTCPeerConnection.prototype.setLocalDescription = function (description) {
+  window.RTCPeerConnection.prototype.setLocalDescription = function (description, ...rest) {
     if (description && description.sdp) {
       const preferred = window.__sspro_preferred_codec || 'VP9';
       description = new RTCSessionDescription({
@@ -149,11 +183,11 @@ export function installWebRTCSDPPatcher() {
         sdp: mungeSDP(description.sdp, preferred)
       });
     }
-    return origSetLocalDescription.apply(this, arguments);
+    return origSetLocalDescription.apply(this, description !== undefined ? [description, ...rest] : []);
   };
 
   const origSetRemoteDescription = window.RTCPeerConnection.prototype.setRemoteDescription;
-  window.RTCPeerConnection.prototype.setRemoteDescription = function (description) {
+  window.RTCPeerConnection.prototype.setRemoteDescription = function (description, ...rest) {
     if (description && description.sdp) {
       const preferred = window.__sspro_preferred_codec || 'VP9';
       description = new RTCSessionDescription({
@@ -161,7 +195,7 @@ export function installWebRTCSDPPatcher() {
         sdp: mungeSDP(description.sdp, preferred)
       });
     }
-    return origSetRemoteDescription.apply(this, arguments);
+    return origSetRemoteDescription.apply(this, description !== undefined ? [description, ...rest] : []);
   };
 
   const origCreateOffer = window.RTCPeerConnection.prototype.createOffer;
@@ -370,6 +404,12 @@ export class MultiStreamRoomEngine {
     this.discoveryTimeouts = [];
     this.telemetryTickCount = 0;
     this.previousStats = new Map();
+    this.callRetryCounts = new Map();
+    this.callRetryTimers = new Map();
+    this.lastStreamRequestAt = new Map();
+    this._lastSentVisibility = new Map();
+    this._encodingLocks = new Map();
+    this.customTurnConfig = null;
 
     let savedClientId = '';
     try {
@@ -549,7 +589,7 @@ export class MultiStreamRoomEngine {
           path: '/',
           secure: true,
           config: {
-            iceServers: ICE_SERVERS,
+            iceServers: buildIceServers(this.customTurnConfig),
             iceCandidatePoolSize: 2,
             sdpSemantics: 'unified-plan'
           },
@@ -1035,6 +1075,7 @@ export class MultiStreamRoomEngine {
         }
 
         case 'stream-state': {
+          this._lastSentVisibility.delete(remotePeerId);
           peerEntry.sharing = Boolean(msg.sharing);
           peerEntry.streamMeta = msg.streamMeta || null;
           if (!peerEntry.sharing) {
@@ -1060,14 +1101,20 @@ export class MultiStreamRoomEngine {
         }
 
         case 'viewer-visibility': {
-          peerEntry.viewerVisibility = Boolean(msg.visible);
-          peerEntry.viewerTier = msg.tier || 'high';
+          const nextVis = Boolean(msg.visible);
+          const nextTier = msg.tier || 'high';
+          const changed = peerEntry.viewerVisibility !== nextVis || peerEntry.viewerTier !== nextTier;
+          peerEntry.viewerVisibility = nextVis;
+          peerEntry.viewerTier = nextTier;
           if (peerEntry.viewerVisibility && this.isSharing && this.localStream && !this._hasActiveOutgoingCall(remotePeerId)) {
             this._callPeerWithScreen(remotePeerId);
-          } else {
+          } else if (changed) {
             this._applyEncodingForPeer(remotePeerId);
           }
-          this._notifyPeersUpdated();
+          // Só notifica a UI quando houver alteração real, evitando loop infinito de ping-pong com viewer-visibility
+          if (changed) {
+            this._notifyPeersUpdated();
+          }
           break;
         }
 
@@ -1149,6 +1196,20 @@ export class MultiStreamRoomEngine {
       console.warn('Aviso na chamada incoming de', remotePeerId, err);
     });
 
+    const incPc = mediaConn.peerConnection;
+    if (incPc) {
+      const handleIncomingIceFailure = () => {
+        if (mediaConn._ssproReplaced || this.incomingCalls.get(remotePeerId) !== mediaConn) return;
+        const ice = incPc.iceConnectionState;
+        const state = incPc.connectionState;
+        if (ice === 'failed' || state === 'failed') {
+          this._requestStreamWithCooldown(remotePeerId, 4000);
+        }
+      };
+      incPc.addEventListener('iceconnectionstatechange', handleIncomingIceFailure);
+      incPc.addEventListener('connectionstatechange', handleIncomingIceFailure);
+    }
+
     mediaConn.on('stream', (remoteStream) => {
       const incClientId = mediaConn.metadata?.clientId || null;
       const incNick = mediaConn.metadata?.nickname || 'Amigo';
@@ -1207,7 +1268,49 @@ export class MultiStreamRoomEngine {
     });
   }
 
+  _requestStreamWithCooldown(remotePeerId, cooldownMs = 4000) {
+    const peerEntry = this.peers.get(remotePeerId);
+    if (!peerEntry || !peerEntry.sharing) return;
+    const now = Date.now();
+    const last = this.lastStreamRequestAt.get(remotePeerId) || 0;
+    if (now - last < cooldownMs) return;
+    this.lastStreamRequestAt.set(remotePeerId, now);
+    this._sendToPeer(remotePeerId, { type: 'request-stream' });
+  }
+
+  _clearCallRetry(remotePeerId) {
+    const timer = this.callRetryTimers.get(remotePeerId);
+    if (timer) {
+      clearTimeout(timer);
+      this.callRetryTimers.delete(remotePeerId);
+    }
+    this.callRetryCounts.delete(remotePeerId);
+  }
+
+  _scheduleCallRetry(remotePeerId) {
+    if (!this.isSharing || !this.localStream || !this.peers.has(remotePeerId)) return;
+    if (this.callRetryTimers.has(remotePeerId)) return;
+
+    const attempts = this.callRetryCounts.get(remotePeerId) || 0;
+    if (attempts >= 3) return;
+    this.callRetryCounts.set(remotePeerId, attempts + 1);
+
+    const delayMs = 1500 * (attempts + 1);
+    const timer = setTimeout(() => {
+      this.callRetryTimers.delete(remotePeerId);
+      if (!this.isSharing || !this.localStream || !this.peers.has(remotePeerId)) return;
+      if (!this._hasActiveOutgoingCall(remotePeerId)) {
+        this._callPeerWithScreen(remotePeerId);
+      }
+    }, delayMs);
+    this.callRetryTimers.set(remotePeerId, timer);
+  }
+
   _handlePeerDisconnected(remotePeerId) {
+    this._clearCallRetry(remotePeerId);
+    this.lastStreamRequestAt.delete(remotePeerId);
+    this._lastSentVisibility.delete(remotePeerId);
+    this._encodingLocks.delete(remotePeerId);
     if (this.allowedControllerPeerId === remotePeerId) {
       this.allowedControllerPeerId = null;
       this.callbacks.onControllerStopped?.({ peerId: remotePeerId });
@@ -1293,10 +1396,17 @@ export class MultiStreamRoomEngine {
    * permitindo pausar o envio de vídeo na origem para economizar GPU e banda.
    */
   setRemoteStreamVisibility(remotePeerId, visible, tier = 'high') {
+    const nextVis = Boolean(visible);
+    const nextTier = tier || 'high';
+    const prev = this._lastSentVisibility.get(remotePeerId);
+    if (prev && prev.visible === nextVis && prev.tier === nextTier) {
+      return;
+    }
+    this._lastSentVisibility.set(remotePeerId, { visible: nextVis, tier: nextTier });
     this._sendToPeer(remotePeerId, {
       type: 'viewer-visibility',
-      visible: Boolean(visible),
-      tier
+      visible: nextVis,
+      tier: nextTier
     });
   }
 
@@ -1496,28 +1606,43 @@ export class MultiStreamRoomEngine {
       ...customConfig
     };
 
+    if (typeof window !== 'undefined') {
+      window.__sspro_preferred_codec = this.qualityConfig.codec || 'VP9';
+    }
+
+    const env = await window.electronAPI?.getEnvironment?.();
+    const isLinux =
+      env?.platform === 'linux' ||
+      window.electronAPI?.platform === 'linux' ||
+      (typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent));
+    const isWayland = Boolean(env?.isWayland);
+
     const { sourceId, includeSystemAudio, width, height, fps, contentHint } = this.qualityConfig;
 
     let isolatedAudioTrack = null;
-    if (includeSystemAudio) {
+    if (includeSystemAudio && !isLinux) {
       const workerTarget = this._resolveAudioWorkerTarget();
       isolatedAudioTrack = await this._setupIsolatedAudioTrack(workerTarget);
     } else {
       this._stopIsolatedAudioCapture();
     }
 
-    const useFallbackSystemLoopback = Boolean(includeSystemAudio && !isolatedAudioTrack);
+    // 'loopback' via setDisplayMediaRequestHandler só existe no Windows; no Linux solicitar audio:true
+    // provoca falha e segunda chamada de getDisplayMedia (abrindo o portal do sistema múltiplas vezes).
+    const useFallbackSystemLoopback = Boolean(!isLinux && includeSystemAudio && !isolatedAudioTrack);
 
     // Prepara o handler do processo principal do Electron com a janela/tela escolhida
     if (window.electronAPI?.prepareCapture) {
       await window.electronAPI.prepareCapture({
         sourceId,
-        includeSystemAudio,
-        useFallbackSystemLoopback
+        includeSystemAudio: !isLinux && includeSystemAudio,
+        useFallbackSystemLoopback,
+        forceSourcesEnum: false
       });
     }
 
     let newStream = null;
+    let lastDisplayMediaErr = null;
 
     // 1ª tentativa: getDisplayMedia nativo (WGC no Windows / PipeWire no Linux)
     try {
@@ -1530,23 +1655,56 @@ export class MultiStreamRoomEngine {
         audio: useFallbackSystemLoopback
       });
     } catch (err) {
-      console.warn('getDisplayMedia com áudio falhou, tentando apenas com vídeo:', err);
-      try {
-        newStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: width, max: width },
-            height: { ideal: height, max: height },
-            frameRate: { ideal: fps, max: fps }
-          },
-          audio: false
-        });
-      } catch (retryErr) {
-        console.warn('getDisplayMedia apenas com vídeo também falhou, tentando fallback getUserMedia:', retryErr);
+      lastDisplayMediaErr = err;
+      if (useFallbackSystemLoopback) {
+        console.warn('getDisplayMedia com áudio falhou, tentando apenas com vídeo:', err);
+        try {
+          newStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: { ideal: width, max: width },
+              height: { ideal: height, max: height },
+              frameRate: { ideal: fps, max: fps }
+            },
+            audio: false
+          });
+        } catch (retryErr) {
+          lastDisplayMediaErr = retryErr;
+          console.warn('getDisplayMedia apenas com vídeo também falhou:', retryErr);
+        }
+      } else if (
+        isWayland &&
+        err?.name !== 'NotAllowedError' &&
+        err?.name !== 'AbortError' &&
+        window.electronAPI?.prepareCapture
+      ) {
+        console.warn('getDisplayMedia direto no Wayland falhou; tentando fallback com desktopCapturer:', err);
+        try {
+          await window.electronAPI.prepareCapture({
+            sourceId,
+            includeSystemAudio: false,
+            useFallbackSystemLoopback: false,
+            forceSourcesEnum: true
+          });
+          newStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: { ideal: width, max: width },
+              height: { ideal: height, max: height },
+              frameRate: { ideal: fps, max: fps }
+            },
+            audio: false
+          });
+        } catch (fallbackErr) {
+          lastDisplayMediaErr = fallbackErr;
+          console.warn('Fallback getDisplayMedia no Wayland também falhou:', fallbackErr);
+        }
+      } else {
+        console.warn('getDisplayMedia falhou ou foi cancelado pelo usuário:', lastDisplayMediaErr);
       }
     }
 
-    // 2ª tentativa: Fallback direto por sourceId via desktopCapturer
-    if (!newStream && sourceId) {
+    // 2ª tentativa (apenas Windows / Linux X11): Fallback direto por sourceId via desktopCapturer.
+    // No Wayland nunca usar chromeMediaSource:'desktop', pois usa X11 XGetImage e gera tela preta.
+    if (!newStream && sourceId && !isWayland) {
       const videoConstraints = {
         mandatory: {
           chromeMediaSource: 'desktop',
@@ -1662,6 +1820,10 @@ export class MultiStreamRoomEngine {
       ...partialConfig
     };
 
+    if (typeof window !== 'undefined') {
+      window.__sspro_preferred_codec = this.qualityConfig.codec || 'VP9';
+    }
+
     if (!this.isSharing || !this.localStream) return;
 
     if (resolutionOrSourceChanged && this.qualityConfig.sourceId) {
@@ -1709,7 +1871,14 @@ export class MultiStreamRoomEngine {
     }
     this.isSharing = false;
 
+    for (const [, timer] of this.callRetryTimers.entries()) {
+      clearTimeout(timer);
+    }
+    this.callRetryTimers.clear();
+    this.callRetryCounts.clear();
+
     for (const [, call] of this.outgoingCalls.entries()) {
+      call._ssproReplaced = true;
       try { call.close(); } catch (_) {}
     }
     this.outgoingCalls.clear();
@@ -1773,6 +1942,15 @@ export class MultiStreamRoomEngine {
     if (pc) {
       this._applyCodecPreference(pc, this.qualityConfig.codec || 'VP9');
 
+      const handleOutgoingFailure = () => {
+        if (call._ssproReplaced || this.outgoingCalls.get(remotePeerId) !== call) return;
+        call._ssproReplaced = true;
+        try { call.close(); } catch (_) {}
+        this.outgoingCalls.delete(remotePeerId);
+        // PeerJS não renegocia pc.restartIce() automaticamente; refaz a chamada com backoff
+        this._scheduleCallRetry(remotePeerId);
+      };
+
       pc.addEventListener('signalingstatechange', () => {
         if (pc.signalingState === 'stable') {
           this._applyEncodingForPeer(remotePeerId);
@@ -1781,25 +1959,19 @@ export class MultiStreamRoomEngine {
 
       pc.addEventListener('connectionstatechange', () => {
         if (pc.connectionState === 'connected') {
+          this._clearCallRetry(remotePeerId);
           this._applyEncodingForPeer(remotePeerId);
         } else if (pc.connectionState === 'failed') {
-          try {
-            if (typeof pc.restartIce === 'function') {
-              pc.restartIce();
-            }
-          } catch (_) {}
+          handleOutgoingFailure();
         }
       });
 
       pc.addEventListener('iceconnectionstatechange', () => {
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          this._clearCallRetry(remotePeerId);
           this._applyEncodingForPeer(remotePeerId);
         } else if (pc.iceConnectionState === 'failed') {
-          try {
-            if (typeof pc.restartIce === 'function') {
-              pc.restartIce();
-            }
-          } catch (_) {}
+          handleOutgoingFailure();
         }
       });
     }
@@ -1816,11 +1988,15 @@ export class MultiStreamRoomEngine {
 
       const targetMime = `video/${preferredCodec}`.toLowerCase();
       const preferred = [];
+      const aux = [];
       const rest = [];
 
       for (const codec of capabilities.codecs) {
-        if (codec.mimeType.toLowerCase() === targetMime) {
+        const mime = codec.mimeType.toLowerCase();
+        if (mime === targetMime) {
           preferred.push(codec);
+        } else if (mime === 'video/rtx' || mime === 'video/red' || mime === 'video/ulpfec') {
+          aux.push(codec);
         } else {
           rest.push(codec);
         }
@@ -1833,7 +2009,7 @@ export class MultiStreamRoomEngine {
             typeof transceiver.setCodecPreferences === 'function'
           ) {
             try {
-              transceiver.setCodecPreferences([...preferred, ...rest]);
+              transceiver.setCodecPreferences([...preferred, ...aux, ...rest]);
             } catch (_) {}
           }
         }
@@ -1847,63 +2023,74 @@ export class MultiStreamRoomEngine {
     const call = this.outgoingCalls.get(remotePeerId);
     const pc = call?.peerConnection;
     if (!pc) return;
-    if (pc.signalingState !== 'stable') return;
+    if (pc.signalingState !== 'stable' || !pc.currentLocalDescription || !pc.currentRemoteDescription) {
+      return;
+    }
 
-    const peerEntry = this.peers.get(remotePeerId);
-    // IMPORTANTE: isVisibleOnViewer inicia como TRUE para que streams novas nunca fiquem
-    // travadas em 0.0 Mbps / tela preta por dessincronização de eventos
-    const isVisibleOnViewer = peerEntry ? peerEntry.viewerVisibility !== false : true;
-    const viewerTier = peerEntry?.viewerTier || 'high';
+    if (this._encodingLocks.get(remotePeerId)) {
+      return;
+    }
+    this._encodingLocks.set(remotePeerId, true);
 
-    const senders = pc.getSenders ? pc.getSenders() : [];
-    for (const sender of senders) {
-      if (!sender.track) continue;
+    try {
+      const peerEntry = this.peers.get(remotePeerId);
+      // IMPORTANTE: isVisibleOnViewer inicia como TRUE para que streams novas nunca fiquem
+      // travadas em 0.0 Mbps / tela preta por dessincronização de eventos
+      const isVisibleOnViewer = peerEntry ? peerEntry.viewerVisibility !== false : true;
+      const viewerTier = peerEntry?.viewerTier || 'high';
 
-      if (sender.track.kind === 'video') {
-        try {
-          const params = sender.getParameters();
-          if (!params.encodings || params.encodings.length === 0) {
-            params.encodings = [{}];
-          }
+      const senders = pc.getSenders ? pc.getSenders() : [];
+      for (const sender of senders) {
+        if (!sender.track) continue;
 
-          params.degradationPreference =
-            this.qualityConfig.degradationPreference || 'balanced';
-
-          const encoding = params.encodings[0];
-          // Mantém o encoder WebRTC sempre ativo para evitar congelamento em 0.0 Mbps / tela preta
-          encoding.active = true;
-
-          const isThumbnailScale = this.smartScalingEnabled && (viewerTier === 'thumbnail' || !isVisibleOnViewer);
-          const targetBitrateMbps = !isVisibleOnViewer
-            ? Math.max(3.0, Math.round(this.qualityConfig.bitrateMbps * 0.35)) // Mínimo de 3 Mbps em standby (evita descarte de frames)
-            : isThumbnailScale
-            ? Math.max(4.0, Math.round(this.qualityConfig.bitrateMbps * 0.50))
-            : this.qualityConfig.bitrateMbps;
-
-          encoding.maxBitrate = Math.round(targetBitrateMbps * 1_000_000);
+        if (sender.track.kind === 'video') {
           try {
-            encoding.minBitrate = Math.round(Math.min(1.5, targetBitrateMbps * 0.3) * 1_000_000);
-          } catch (_) {}
-          encoding.maxFramerate = !isVisibleOnViewer ? 20 : this.qualityConfig.fps;
-          encoding.scaleResolutionDownBy = isThumbnailScale ? 1.5 : 1.0;
-          encoding.priority = 'high';
-          encoding.networkPriority = 'high';
+            const params = sender.getParameters();
+            if (!params?.encodings || params.encodings.length === 0) {
+              continue;
+            }
 
-          await sender.setParameters(params);
-        } catch (err) {
-          console.warn('Aviso ao configurar parâmetros de vídeo WebRTC:', err?.message || err);
-        }
-      } else if (sender.track.kind === 'audio') {
-        try {
-          const params = sender.getParameters();
-          if (!params.encodings || params.encodings.length === 0) {
-            params.encodings = [{}];
+            params.degradationPreference =
+              this.qualityConfig.degradationPreference || 'balanced';
+
+            const encoding = params.encodings[0];
+            // Mantém o encoder WebRTC sempre ativo para evitar congelamento em 0.0 Mbps / tela preta
+            encoding.active = true;
+
+            const isThumbnailScale = this.smartScalingEnabled && (viewerTier === 'thumbnail' || !isVisibleOnViewer);
+            const targetBitrateMbps = !isVisibleOnViewer
+              ? Math.max(3.0, Math.round(this.qualityConfig.bitrateMbps * 0.35)) // Mínimo de 3 Mbps em standby (evita descarte de frames)
+              : isThumbnailScale
+              ? Math.max(4.0, Math.round(this.qualityConfig.bitrateMbps * 0.50))
+              : this.qualityConfig.bitrateMbps;
+
+            encoding.maxBitrate = Math.round(targetBitrateMbps * 1_000_000);
+            try {
+              encoding.minBitrate = Math.round(Math.min(0.3, targetBitrateMbps * 0.2) * 1_000_000);
+            } catch (_) {}
+            encoding.maxFramerate = !isVisibleOnViewer ? 20 : this.qualityConfig.fps;
+            encoding.scaleResolutionDownBy = isThumbnailScale ? 1.5 : 1.0;
+            encoding.priority = 'high';
+            encoding.networkPriority = 'high';
+
+            await sender.setParameters(params);
+          } catch (err) {
+            console.warn('Aviso ao configurar parâmetros de vídeo WebRTC:', err?.message || err);
           }
-          params.encodings[0].maxBitrate = 192_000;
-          params.encodings[0].priority = 'high';
-          await sender.setParameters(params);
-        } catch (_) {}
+        } else if (sender.track.kind === 'audio') {
+          try {
+            const params = sender.getParameters();
+            if (!params?.encodings || params.encodings.length === 0) {
+              continue;
+            }
+            params.encodings[0].maxBitrate = 192_000;
+            params.encodings[0].priority = 'high';
+            await sender.setParameters(params);
+          } catch (_) {}
+        }
       }
+    } finally {
+      this._encodingLocks.delete(remotePeerId);
     }
   }
 
@@ -1968,10 +2155,12 @@ export class MultiStreamRoomEngine {
           let width = 0;
           let height = 0;
           let bytesReceived = 0;
+          let framesDecoded = 0;
           let timestamp = 0;
           let rttMs = null;
           let codecName = '';
           let decoderImpl = '';
+          let candidateType = '';
 
           report.forEach((stat) => {
             if (stat.type === 'inbound-rtp' && stat.kind === 'video') {
@@ -1979,6 +2168,7 @@ export class MultiStreamRoomEngine {
               width = stat.frameWidth || 0;
               height = stat.frameHeight || 0;
               bytesReceived = stat.bytesReceived || 0;
+              framesDecoded = stat.framesDecoded || 0;
               timestamp = stat.timestamp || Date.now();
               decoderImpl = stat.decoderImplementation || '';
               if (stat.codecId && report.get(stat.codecId)) {
@@ -1986,8 +2176,17 @@ export class MultiStreamRoomEngine {
                 codecName = (codecStat.mimeType || '').replace('video/', '');
               }
             }
-            if (stat.type === 'candidate-pair' && stat.state === 'succeeded' && stat.currentRoundTripTime != null) {
-              rttMs = Math.round(stat.currentRoundTripTime * 1000);
+            if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+              if (stat.currentRoundTripTime != null) {
+                rttMs = Math.round(stat.currentRoundTripTime * 1000);
+              }
+              const remoteCand = stat.remoteCandidateId ? report.get(stat.remoteCandidateId) : null;
+              const localCand = stat.localCandidateId ? report.get(stat.localCandidateId) : null;
+              if (localCand?.candidateType === 'relay' || remoteCand?.candidateType === 'relay') {
+                candidateType = 'relay';
+              } else if (remoteCand?.candidateType || localCand?.candidateType) {
+                candidateType = remoteCand?.candidateType || localCand?.candidateType;
+              }
             }
           });
 
@@ -2005,11 +2204,127 @@ export class MultiStreamRoomEngine {
             width,
             height,
             bitrateMbps,
+            bytesReceived,
+            framesDecoded,
             rttMs,
             codecName,
-            decoderImpl
+            decoderImpl,
+            iceState: pc.iceConnectionState || 'new',
+            connectionState: pc.connectionState || 'new',
+            candidateType
           };
         } catch (_) {}
+      }
+
+      // Coleta resumo de envio (detecta se o ICE de saída travou, está sem TURN ou a captura está sem frames)
+      if (!this._prevOutgoingStats) {
+        this._prevOutgoingStats = new Map();
+      }
+      const localVideoTrack = this.localStream?.getVideoTracks?.()[0] || null;
+      const trackInfo = {
+        muted: Boolean(localVideoTrack?.muted),
+        readyState: localVideoTrack?.readyState || 'none'
+      };
+      const outgoingStats = {};
+      for (const [remotePeerId, call] of this.outgoingCalls.entries()) {
+        const pc = call?.peerConnection;
+        if (!pc) continue;
+        try {
+          const report = await pc.getStats();
+          let bytesSent = 0;
+          let framesEncoded = 0;
+          let timestamp = 0;
+          let codecName = '';
+          let encoderImpl = '';
+          let candidateType = '';
+          const localCandTypes = new Set();
+          const remoteCandTypes = new Set();
+          const localSrflxPorts = new Set();
+          const remoteSrflxPorts = new Set();
+          let stunReqSent = 0;
+          let stunRespRecv = 0;
+          let stunReqRecv = 0;
+          report.forEach((stat) => {
+            if (stat.type === 'local-candidate' && stat.candidateType) {
+              localCandTypes.add(stat.candidateType);
+              if (stat.candidateType === 'srflx' && stat.port) {
+                localSrflxPorts.add(stat.port);
+              }
+            }
+            if (stat.type === 'remote-candidate' && stat.candidateType) {
+              remoteCandTypes.add(stat.candidateType);
+              if (stat.candidateType === 'srflx' && stat.port) {
+                remoteSrflxPorts.add(stat.port);
+              }
+            }
+            if (stat.type === 'candidate-pair') {
+              stunReqSent += stat.requestsSent || 0;
+              stunRespRecv += stat.responsesReceived || 0;
+              stunReqRecv += stat.requestsReceived || 0;
+            }
+            if (stat.type === 'outbound-rtp' && stat.kind === 'video') {
+              bytesSent = stat.bytesSent || 0;
+              framesEncoded = stat.framesEncoded || 0;
+              timestamp = stat.timestamp || Date.now();
+              encoderImpl = stat.encoderImplementation || '';
+              if (stat.codecId && report.get(stat.codecId)) {
+                const codecStat = report.get(stat.codecId);
+                codecName = (codecStat.mimeType || '').replace('video/', '');
+              }
+            }
+            if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+              const remoteCand = stat.remoteCandidateId ? report.get(stat.remoteCandidateId) : null;
+              const localCand = stat.localCandidateId ? report.get(stat.localCandidateId) : null;
+              if (localCand?.candidateType === 'relay' || remoteCand?.candidateType === 'relay') {
+                candidateType = 'relay';
+              } else if (remoteCand?.candidateType || localCand?.candidateType) {
+                candidateType = remoteCand?.candidateType || localCand?.candidateType;
+              }
+            }
+          });
+          const prevOut = this._prevOutgoingStats.get(remotePeerId);
+          let bitrateMbps = 0;
+          if (prevOut && timestamp > prevOut.timestamp && bytesSent >= prevOut.bytesSent) {
+            const deltaSec = (timestamp - prevOut.timestamp) / 1000;
+            const bits = (bytesSent - prevOut.bytesSent) * 8;
+            bitrateMbps = Number((bits / deltaSec / 1_000_000).toFixed(1));
+          }
+          this._prevOutgoingStats.set(remotePeerId, { bytesSent, timestamp });
+
+          outgoingStats[remotePeerId] = {
+            iceState: pc.iceConnectionState || 'new',
+            connectionState: pc.connectionState || 'new',
+            signalingState: pc.signalingState || 'unknown',
+            hasRemoteDesc: Boolean(pc.currentRemoteDescription),
+            bytesSent,
+            framesEncoded,
+            bitrateMbps,
+            codecName,
+            encoderImpl,
+            candidateType,
+            localCands: Array.from(localCandTypes).join('+') || 'none',
+            remoteCands: Array.from(remoteCandTypes).join('+') || 'none',
+            icePackets: `txReq=${stunReqSent}/rxResp=${stunRespRecv}/rxReq=${stunReqRecv}/lSrflxP=${localSrflxPorts.size}/rSrflxP=${remoteSrflxPorts.size}`,
+            trackMuted: trackInfo.muted,
+            trackState: trackInfo.readyState
+          };
+        } catch (_) {}
+      }
+
+      if (this.isSharing && (!this._lastTxLogAt || now - this._lastTxLogAt >= 3000)) {
+        this._lastTxLogAt = now;
+        const outEntries = Object.entries(outgoingStats);
+        if (outEntries.length === 0) {
+          console.log(`[SSPRO-TX] track=${trackInfo.readyState} muted=${trackInfo.muted} sem outgoingCalls (ninguém abriu sua tela ainda)`);
+        } else {
+          const summary = outEntries
+            .map(([pid, st]) => {
+              const nick = this.peers.get(pid)?.nickname || pid.slice(-6);
+              return `${nick}(sig=${st.signalingState},remote=${st.hasRemoteDesc},ice=${st.iceState},conn=${st.connectionState},cand=${st.candidateType || 'none'},lCands=${st.localCands},rCands=${st.remoteCands},${st.icePackets},${st.bitrateMbps}Mbps,bytes=${st.bytesSent},frames=${st.framesEncoded},codec=${st.codecName || '?'}/${st.encoderImpl || '?'})`;
+            })
+            .join(' | ');
+          console.log(`[SSPRO-TX] track=${trackInfo.readyState} muted=${trackInfo.muted} -> ${summary}`);
+        }
       }
 
       // Quantos amigos estão assistindo minha transmissão ativamente vs minimizada
@@ -2027,6 +2342,7 @@ export class MultiStreamRoomEngine {
 
       this.callbacks.onTelemetryUpdate?.({
         streams: statsByPeer,
+        outgoing: outgoingStats,
         activeViewers,
         minimizedViewers
       });
@@ -2109,6 +2425,7 @@ export class MultiStreamRoomEngine {
 
     this.peers.clear();
     this.previousStats.clear();
+    this.lastStreamRequestAt.clear();
     this.peer = null;
     this.myPeerId = null;
     this.roomCode = null;

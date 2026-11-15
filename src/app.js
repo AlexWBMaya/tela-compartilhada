@@ -1,6 +1,7 @@
 import { MultiStreamRoomEngine, QUALITY_PRESETS } from './webrtc-engine.js';
 
 const uiState = {
+  env: null,
   layoutMode: 'grid', // 'grid' | 'spotlight' | 'single'
   spotlightStreamId: null,
   minimizedStreams: new Set(), // Streams que o usuário escolheu fechar/ocultar na tela dele
@@ -58,6 +59,9 @@ const el = {
   roomCodeInput: document.getElementById('room-code-input'),
   randomRoomBtn: document.getElementById('random-room-btn'),
   joinRoomSubmitBtn: document.getElementById('join-room-submit-btn'),
+  turnUrlsInput: document.getElementById('turn-urls-input'),
+  turnUsernameInput: document.getElementById('turn-username-input'),
+  turnCredentialInput: document.getElementById('turn-credential-input'),
 
   roomSection: document.getElementById('room-section'),
   roomSidebar: document.getElementById('room-sidebar'),
@@ -275,26 +279,63 @@ const engine = new MultiStreamRoomEngine({
     el.controlActiveBanner.hidden = true;
   },
 
-  onTelemetryUpdate: ({ streams, activeViewers, minimizedViewers }) => {
+  onTelemetryUpdate: ({ streams, outgoing = {}, activeViewers, minimizedViewers }) => {
     for (const [peerId, stat] of Object.entries(streams)) {
       const badge = document.getElementById(`telemetry-${peerId}`);
       if (!badge) continue;
+      if (stat.bytesReceived === 0) {
+        if (stat.iceState === 'failed' || stat.connectionState === 'failed') {
+          badge.textContent = 'Falha P2P (NAT/Firewall - use TURN)';
+          continue;
+        }
+        if (stat.iceState === 'checking' || stat.iceState === 'new') {
+          badge.textContent = 'Conectando P2P (ICE)...';
+          continue;
+        }
+      }
       const resLabel = stat.height ? `${stat.height}p` : 'AO VIVO';
       const fpsLabel = stat.fps ? `${stat.fps} FPS` : '-- FPS';
       const mbpsLabel = `${stat.bitrateMbps.toFixed(1)} Mbps`;
       const pingLabel = stat.rttMs != null ? ` | ${stat.rttMs}ms` : '';
       const codecLabel = stat.codecName ? ` | ${stat.codecName}` : '';
-      badge.textContent = `${resLabel} | ${fpsLabel} | ${mbpsLabel}${pingLabel}${codecLabel}`;
+      const relayLabel = stat.candidateType === 'relay' ? ' | TURN' : '';
+      badge.textContent = `${resLabel} | ${fpsLabel} | ${mbpsLabel}${pingLabel}${codecLabel}${relayLabel}`;
     }
 
     if (engine.isSharing) {
       const meta = engine._buildMyStreamMeta();
-      const viewersInfo =
-        activeViewers > 0
-          ? `${activeViewers} assistindo`
-          : minimizedViewers > 0
-          ? 'Pausado (fecharam sua tela)'
-          : 'Ninguém abriu ainda';
+      const outValues = Object.values(outgoing);
+      const hasFailedIce = outValues.some((o) => o.iceState === 'failed' || o.connectionState === 'failed');
+      const hasCheckingIce =
+        !hasFailedIce &&
+        outValues.some((o) => o.bytesSent === 0 && (o.iceState === 'checking' || o.iceState === 'new'));
+      const totalOutMbps = outValues.reduce((acc, o) => acc + (o.bitrateMbps || 0), 0);
+      const maxFrames = outValues.reduce((acc, o) => Math.max(acc, o.framesEncoded || 0), 0);
+      const anyTrackMuted = outValues.some((o) => o.trackMuted);
+      const anyRelay = outValues.some((o) => o.candidateType === 'relay');
+      const zeroFramesIceOk =
+        !hasFailedIce &&
+        !hasCheckingIce &&
+        outValues.length > 0 &&
+        outValues.every((o) => (o.framesEncoded || 0) === 0);
+
+      let viewersInfo = '';
+      if (hasFailedIce) {
+        viewersInfo = 'Falha P2P ao enviar (NAT/Firewall - use TURN)';
+      } else if (hasCheckingIce) {
+        viewersInfo = 'Negociando P2P (ICE checking)...';
+      } else if (anyTrackMuted) {
+        viewersInfo = 'Captura silenciada/pausada pelo sistema (track muted)';
+      } else if (zeroFramesIceOk) {
+        viewersInfo = 'ICE conectado, mas 0 frames codificados (PipeWire/DMA-BUF?)';
+      } else if (outValues.length > 0) {
+        const turnTag = anyRelay ? ' | TURN' : '';
+        viewersInfo = `${activeViewers || outValues.length} assistindo (${totalOutMbps.toFixed(1)} Mbps | ${maxFrames}f${turnTag})`;
+      } else if (minimizedViewers > 0) {
+        viewersInfo = 'Pausado (fecharam sua tela)';
+      } else {
+        viewersInfo = 'Ninguém abriu ainda';
+      }
       const audioLabel = meta.hasAudio
         ? ` | Som: ${meta.audioWindowTitle ? meta.audioWindowTitle.slice(0, 26) : 'Janela ativa'}`
         : ' | Sem som';
@@ -1005,7 +1046,39 @@ function renderQualityPresets() {
   }
 }
 
+async function ensureEnvironment() {
+  if (uiState.env) return uiState.env;
+  try {
+    uiState.env = (await window.electronAPI?.getEnvironment?.()) || {
+      platform: window.electronAPI?.platform || 'win32',
+      isWayland: false
+    };
+  } catch (_) {
+    uiState.env = {
+      platform: window.electronAPI?.platform || 'win32',
+      isWayland: false
+    };
+  }
+  return uiState.env;
+}
+
 async function loadDesktopSources() {
+  const env = await ensureEnvironment();
+
+  if (env.isWayland) {
+    uiState.availableSources = [];
+    uiState.selectedSourceId = null;
+    uiState.selectedSourceName = 'Tela/Janela (Portal do Sistema)';
+    el.sourcesGrid.innerHTML = `
+      <div class="linux-portal-notice" style="grid-column: 1 / -1; padding: 14px; background: rgba(0, 150, 255, 0.1); border: 1px solid rgba(0, 150, 255, 0.3); border-radius: 8px; font-size: 0.85rem; line-height: 1.5; color: #d0e8ff;">
+        <strong>Linux (Wayland / PipeWire):</strong>
+        <p style="margin: 6px 0 0;">Escolha a qualidade abaixo e clique em <b>Transmitir</b>. O seletor nativo do sistema (KDE/GNOME) abrirá para você escolher a tela ou janela.</p>
+      </div>
+    `;
+    syncAudioTargetPickerUI();
+    return;
+  }
+
   el.sourcesGrid.innerHTML = '<p class="field-hint">Procurando telas e janelas...</p>';
   try {
     const sources = await window.electronAPI.getDesktopSources();
@@ -1057,6 +1130,15 @@ function renderSourcesGrid() {
 
 function syncAudioTargetPickerUI() {
   if (!el.audioTargetPickerRow || !el.selectAudioTarget) return;
+
+  const isLinux = (uiState.env?.platform || window.electronAPI?.platform) === 'linux';
+  if (isLinux) {
+    if (el.shareAudioModeHint) {
+      el.shareAudioModeHint.textContent = 'No Linux, a captura nativa via PipeWire envia apenas vídeo (áudio isolado por janela é exclusivo do Windows).';
+    }
+    el.audioTargetPickerRow.hidden = true;
+    return;
+  }
 
   const audioEnabled = Boolean(el.shareSystemAudioCheckbox?.checked);
   const selectedSrc = uiState.availableSources.find((s) => s.id === uiState.selectedSourceId);
@@ -1216,12 +1298,41 @@ function initEvents() {
     el.roomCodeInput.value = `SALA-${Math.floor(100 + Math.random() * 900)}`;
   }
 
+  try {
+    const savedTurn = JSON.parse(localStorage.getItem('sspro_turn_config') || 'null');
+    if (savedTurn) {
+      if (el.turnUrlsInput && savedTurn.urls) el.turnUrlsInput.value = savedTurn.urls;
+      if (el.turnUsernameInput && savedTurn.username) el.turnUsernameInput.value = savedTurn.username;
+      if (el.turnCredentialInput && savedTurn.credential) el.turnCredentialInput.value = savedTurn.credential;
+      engine.customTurnConfig = savedTurn;
+    }
+  } catch (_) {}
+
+  const persistTurnConfig = () => {
+    const urls = (el.turnUrlsInput?.value || '').trim();
+    const username = (el.turnUsernameInput?.value || '').trim();
+    const credential = (el.turnCredentialInput?.value || '').trim();
+    if (!urls) {
+      engine.customTurnConfig = null;
+      try { localStorage.removeItem('sspro_turn_config'); } catch (_) {}
+      return;
+    }
+    const cfg = { urls, username, credential };
+    engine.customTurnConfig = cfg;
+    try { localStorage.setItem('sspro_turn_config', JSON.stringify(cfg)); } catch (_) {}
+  };
+
+  el.turnUrlsInput?.addEventListener('change', persistTurnConfig);
+  el.turnUsernameInput?.addEventListener('change', persistTurnConfig);
+  el.turnCredentialInput?.addEventListener('change', persistTurnConfig);
+
   el.randomRoomBtn.addEventListener('click', () => {
     el.roomCodeInput.value = `SALA-${Math.floor(100 + Math.random() * 900)}`;
   });
 
   el.joinRoomForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    persistTurnConfig();
     const nickname = el.nicknameInput.value.trim() || 'Jogador';
     const roomCode = engine.normalizeRoomCode(el.roomCodeInput.value);
     if (!roomCode) {

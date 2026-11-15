@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  getEnvironment: () => ipcRenderer.invoke('app:get-environment'),
   getDesktopSources: () => ipcRenderer.invoke('desktop:get-sources'),
   prepareCapture: (config) => ipcRenderer.invoke('desktop:prepare-capture', config),
   startProcessAudio: (config) => ipcRenderer.invoke('audio-capture:start', config),
